@@ -1,0 +1,35 @@
+# Git and IDE
+.git
+.gitignore
+.agents
+.gemini
+.vscode
+.idea
+
+# Python virtual environment and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local database and persistent vectors
+chroma_db/
+invoices.db
+invoice_index/
+
+# Data and report outputs
+inboxes/
+reports/
+scratch/
+invoices_to_process/
+tests/
+
+# Temporary files and logs
+*.log
+*.tmp

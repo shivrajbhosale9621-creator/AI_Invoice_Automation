@@ -1,0 +1,47 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# Streamlit config/secrets (do not commit secrets.toml)
+.streamlit/secrets.toml
+
+# Local application directories & data files (User Data)
+invoices_to_process/
+invoice_index/
+chroma_db/
+reports/
+invoice_report.xlsx
+invoices.db
+*.db
+*.xlsx
+*.pdf
+
+# Testing caches
+.pytest_cache/
+.benchmarks/
+
+# SQLite runtime files
+*.db-shm
+*.db-wal
+*.db-journal
+
+# Generated static visualization charts
+static/charts/*.html
+
+# Local IDE and agent scratchpad
+.agents/
+.gemini/
+.vscode/
+.idea/
+
+# Jupyter Notebooks & checkpoints
+*.ipynb
+.ipynb_checkpoints/
+
