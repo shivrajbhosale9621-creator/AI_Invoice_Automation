@@ -156,6 +156,25 @@ async def lifespan(app: FastAPI):
         logger.info("RapidOCR model warmup completed in %ss", warmup_dur)
     except Exception as exc:
         logger.warning("RapidOCR model warmup encountered error (non-fatal): %s", exc)
+
+    # Ensure database schema is created and up-to-date (users, otp_codes, refresh_tokens, invoices)
+    try:
+        from alembic.config import Config
+        from alembic import command
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Database schema initialized via Alembic migrations (head).")
+    except Exception as mig_err:
+        logger.warning("Alembic migration notice (attempting Base.metadata fallback): %s", mig_err)
+        try:
+            from app.core.database import async_engine, Base
+            import app.models  # ensure models are registered
+            async with async_engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables verified via Base.metadata.create_all.")
+        except Exception as fallback_err:
+            logger.error("Failed to initialize database tables: %s", fallback_err)
+
     yield
 
 

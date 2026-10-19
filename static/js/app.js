@@ -421,6 +421,31 @@ function setupAuth() {
       }
     });
   }
+
+  // Password Visibility Toggles
+  const passwordToggleBtns = document.querySelectorAll(".password-toggle-btn");
+  passwordToggleBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const wrapper = btn.closest(".password-input-wrapper");
+      if (!wrapper) return;
+      const input = wrapper.querySelector("input");
+      if (!input) return;
+
+      const isPassword = input.getAttribute("type") === "password";
+      input.setAttribute("type", isPassword ? "text" : "password");
+
+      const showIcon = btn.querySelector(".eye-show");
+      const hideIcon = btn.querySelector(".eye-hide");
+      if (showIcon && hideIcon) {
+        showIcon.style.display = isPassword ? "none" : "block";
+        hideIcon.style.display = isPassword ? "block" : "none";
+      }
+
+      const label = isPassword ? "Hide passphrase" : "Show passphrase";
+      btn.setAttribute("title", label);
+      btn.setAttribute("aria-label", label);
+    });
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

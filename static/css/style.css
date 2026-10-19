@@ -1590,6 +1590,45 @@ body::before {
   background: #FFFFFF;
 }
 
+.password-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
+.password-input-wrapper .auth-input {
+  padding-right: 2.75rem;
+}
+
+.password-toggle-btn {
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0.35rem;
+  color: var(--ink-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-btn);
+  transition: color 0.15s ease, background-color 0.15s ease;
+  z-index: 2;
+}
+
+.password-toggle-btn:hover {
+  color: var(--ink);
+  background-color: rgba(0, 0, 0, 0.06);
+}
+
+.password-toggle-btn:focus-visible {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 1px;
+}
+
 .auth-stamp-notice {
   padding: 0.85rem 1rem;
   border-radius: var(--radius-btn);
