@@ -1,6 +1,6 @@
+from typing import Optional, Any
 import os
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import Optional
 
 
 class Settings(BaseSettings):
@@ -36,5 +36,23 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    def model_post_init(self, __context: Any) -> None:
+        chat_db = os.getenv("CHAT_DB_PATH")
+        if chat_db:
+            if "sqlite+aiosqlite:///" in chat_db:
+                self.DATABASE_URL = chat_db
+                self.SYNC_DATABASE_URL = chat_db.replace("sqlite+aiosqlite:///", "sqlite:///")
+            elif chat_db.startswith("sqlite:///"):
+                self.SYNC_DATABASE_URL = chat_db
+                self.DATABASE_URL = chat_db.replace("sqlite:///", "sqlite+aiosqlite:///")
+            elif "://" in chat_db:
+                self.DATABASE_URL = chat_db
+                self.SYNC_DATABASE_URL = chat_db
+            else:
+                abs_path = os.path.abspath(chat_db).replace("\\", "/")
+                self.DATABASE_URL = f"sqlite+aiosqlite:///{abs_path}"
+                self.SYNC_DATABASE_URL = f"sqlite:///{abs_path}"
+
 
 settings = Settings()
+

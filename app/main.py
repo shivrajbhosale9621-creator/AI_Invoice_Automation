@@ -141,12 +141,46 @@ def build_invoice_system_message(action: str, invoice_data: dict, file_name: str
     return f"[SYSTEM] Invoice {action}."
 
 
+def resolve_sync_db_url(db_path_or_url: str) -> str:
+    """
+    Convert CHAT_DB_PATH or database URL to the sync sqlite:/// URL required by Alembic.
+    Converts async scheme (sqlite+aiosqlite:///) to sync scheme (sqlite:///).
+    If a file path is provided, resolves it to an absolute SQLite URI.
+    """
+    if "sqlite+aiosqlite:///" in db_path_or_url:
+        return db_path_or_url.replace("sqlite+aiosqlite:///", "sqlite:///")
+    if db_path_or_url.startswith("sqlite:///"):
+        return db_path_or_url
+    if "://" in db_path_or_url:
+        return db_path_or_url
+    abs_path = os.path.abspath(db_path_or_url).replace("\\", "/")
+    return f"sqlite:///{abs_path}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI Lifespan Handler (Startup Warmup & Graceful Teardown)
 # ─────────────────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup warmup: Pre-load RapidOCR ONNX model in thread pool so cold-start overhead is zero
+    # 1. Run database migrations automatically before OCR warmup
+    try:
+        from alembic.config import Config
+        from alembic import command
+
+        sync_db_url = resolve_sync_db_url(CHAT_DB_PATH)
+        ini_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "alembic.ini")
+        if not os.path.exists(ini_path):
+            ini_path = "alembic.ini"
+
+        alembic_cfg = Config(ini_path)
+        alembic_cfg.set_main_option("sqlalchemy.url", sync_db_url)
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Database migrations applied successfully targeting %s", sync_db_url)
+    except Exception as exc:
+        logger.error("Failed to apply database migrations on startup: %s", exc, exc_info=True)
+        raise
+
+    # 2. Startup warmup: Pre-load RapidOCR ONNX model in thread pool so cold-start overhead is zero
     t0 = time.time()
     logger.info("Starting RapidOCR ONNX model warmup...")
     try:
@@ -156,24 +190,6 @@ async def lifespan(app: FastAPI):
         logger.info("RapidOCR model warmup completed in %ss", warmup_dur)
     except Exception as exc:
         logger.warning("RapidOCR model warmup encountered error (non-fatal): %s", exc)
-
-    # Ensure database schema is created and up-to-date (users, otp_codes, refresh_tokens, invoices)
-    try:
-        from alembic.config import Config
-        from alembic import command
-        alembic_cfg = Config("alembic.ini")
-        command.upgrade(alembic_cfg, "head")
-        logger.info("Database schema initialized via Alembic migrations (head).")
-    except Exception as mig_err:
-        logger.warning("Alembic migration notice (attempting Base.metadata fallback): %s", mig_err)
-        try:
-            from app.core.database import async_engine, Base
-            import app.models  # ensure models are registered
-            async with async_engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database tables verified via Base.metadata.create_all.")
-        except Exception as fallback_err:
-            logger.error("Failed to initialize database tables: %s", fallback_err)
 
     yield
 
