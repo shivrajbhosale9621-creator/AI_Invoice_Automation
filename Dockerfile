@@ -25,11 +25,14 @@ COPY . .
 # Ensure runtime directories exist
 RUN mkdir -p inboxes reports chroma_db
 
+# Pre-download and bake ML models into image layers (RapidOCR ONNX & ChromaDB DefaultEmbeddingFunction)
+RUN python -c "from ocr_engine import get_ocr_model_paths; get_ocr_model_paths(); from chromadb.utils import embedding_functions; embedding_functions.DefaultEmbeddingFunction()(['warmup'])"
+
 # Expose default application port
 EXPOSE 5000
 
 # Healthcheck to ensure FastAPI service is live on active $PORT
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT}/api/health || exit 1
 
 # Launch FastAPI app with Uvicorn respecting $PORT injected by Cloud Run
