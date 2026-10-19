@@ -155,10 +155,10 @@
                   AUDITED &bull; LIVE
                 </span>
               </div>
-              <div class="hero-spend-value" id="stat-total-spend">$0.00</div>
+              <div class="hero-spend-value" id="stat-total-spend">₹0.00</div>
               <div class="hero-spend-meta">
-                <span class="kpi-subtext">AVERAGE VOUCHER: <strong id="stat-avg-spend" style="color:var(--ink);">$0.00</strong></span>
-                <span class="kpi-subtext">CURRENCY: <strong>USD</strong></span>
+                <span class="kpi-subtext">AVERAGE VOUCHER: <strong id="stat-avg-spend" style="color:var(--ink);">₹0.00</strong></span>
+                <span class="kpi-subtext">CURRENCY: <strong>INR (₹)</strong></span>
               </div>
             </div>
 
@@ -304,19 +304,19 @@
                   One-touch dispatch to AI Orchestrator tools:
                 </p>
                 <div class="quick-prompt-grid">
-                  <button class="quick-prompt-btn quick-prompt-chip" data-prompt="Find top 5 sellers by total invoice amount">
+                  <button class="quick-prompt-btn quick-prompt-chip" id="btn-dispatch-rank-vendors" data-prompt="Find top 5 sellers by total invoice amount">
                     <strong>RANK VENDORS</strong>
                     <span>Extract top 5 sellers by volume</span>
                   </button>
-                  <button class="quick-prompt-btn quick-prompt-chip" data-prompt="Generate an Excel report for all unpaid invoices">
+                  <button class="quick-prompt-btn quick-prompt-chip" id="btn-dispatch-export-unpaid" data-prompt="Generate an Excel report for all unpaid invoices">
                     <strong>EXPORT UNPAID VOUCHERS</strong>
                     <span>Compile Excel report</span>
                   </button>
-                  <button class="quick-prompt-btn quick-prompt-chip" data-prompt="Show a spend breakdown chart across all categories">
+                  <button class="quick-prompt-btn quick-prompt-chip" id="btn-dispatch-visual-audit" data-prompt="Show a spend breakdown chart across all categories">
                     <strong>VISUAL AUDIT</strong>
                     <span>Generate distribution graph</span>
                   </button>
-                  <button class="quick-prompt-btn" onclick="switchView('upload')">
+                  <button class="quick-prompt-btn" id="btn-dispatch-file-invoice" type="button">
                     <strong>FILE NEW INVOICE</strong>
                     <span>Open incoming OCR intake tray</span>
                   </button>
@@ -595,7 +595,7 @@
                 </div>
                 <div class="field-item">
                   <div class="field-label">TOTAL DISBURSED</div>
-                  <div class="field-value" id="res-amount">$0.00</div>
+                  <div class="field-value" id="res-amount">₹0.00</div>
                 </div>
                 <div class="field-item">
                   <div class="field-label">DATE ISSUED</div>

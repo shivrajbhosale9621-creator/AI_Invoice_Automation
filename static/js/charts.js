@@ -6,6 +6,62 @@ let trendChartInstance = null;
 let donutChartInstance = null;
 let vendorChartInstance = null;
 
+function cleanVendorName(raw) {
+  if (!raw) return "Unknown Vendor";
+  if (typeof raw === "object") {
+    return raw.name || raw.vendor_name || raw.company_name || raw.seller || raw.title || "Unknown Vendor";
+  }
+  let str = String(raw).trim();
+  if (!str || str.toLowerCase() === "unknown" || str.toLowerCase() === "unknown vendor" || str.toLowerCase() === "n/a") {
+    return "Unknown Vendor";
+  }
+  if ((str.startsWith("{") && str.endsWith("}")) || (str.startsWith("(") && str.endsWith(")"))) {
+    try {
+      const normalized = str.replace(/'/g, '"');
+      const parsed = JSON.parse(normalized);
+      if (typeof parsed === "object" && parsed !== null) {
+        return parsed.name || parsed.vendor_name || parsed.company_name || parsed.seller || "Unknown Vendor";
+      }
+    } catch (e) {
+      const match = str.match(/['"](?:name|vendor_name|company|seller)['"]\s*:\s*['"]([^'"]+)['"]/i);
+      if (match && match[1]) return match[1].trim();
+    }
+  }
+  return str;
+}
+
+function parseInvoiceDate(inv) {
+  const raw = inv.invoice_date || inv.date || inv.issue_date || inv.created_at || "";
+  if (!raw || raw === "N/A" || raw === "Unknown") return null;
+  const str = String(raw).trim();
+
+  const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
+  if (isoMatch) {
+    const y = isoMatch[1];
+    const m = isoMatch[2].padStart(2, "0");
+    const d = isoMatch[3].padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  const dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})/);
+  if (dmyMatch) {
+    const d = dmyMatch[1].padStart(2, "0");
+    const m = dmyMatch[2].padStart(2, "0");
+    const y = dmyMatch[3];
+    return `${y}-${m}-${d}`;
+  }
+
+  const parsed = new Date(str);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, "0");
+    const d = String(parsed.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  return null;
+}
+
 export const charts = {
   /**
    * Set global Chart.js defaults to fit Paper Invoice theme
@@ -38,7 +94,7 @@ export const charts = {
   },
 
   /**
-   * 1. Spend Trajectory — Thin 2px ink line, no area fill, hairline grid, mono axis
+   * 1. Spend Trajectory — Connected ink line, chronological date grouping, Rupee amounts
    */
   renderSpendTrend(invoices) {
     const canvas = document.getElementById("chart-spend-trend");
@@ -47,23 +103,31 @@ export const charts = {
 
     const dateMap = {};
     invoices.forEach((inv) => {
-      const dateStr = inv.invoice_date || "";
-      let key = "Unknown";
-      if (dateStr && dateStr !== "N/A") {
-        const parts = dateStr.split("-");
-        if (parts.length >= 2) {
-          key = `${parts[0]}-${parts[1]}`;
-        } else {
-          key = dateStr.substring(0, 7);
-        }
-      }
+      const parsedDate = parseInvoiceDate(inv);
+      const key = parsedDate || new Date().toISOString().slice(0, 10);
       const amt = parseFloat(inv.total_amount) || 0;
       dateMap[key] = (dateMap[key] || 0) + amt;
     });
 
     const sortedKeys = Object.keys(dateMap).sort();
-    const labels = sortedKeys.length > 0 ? sortedKeys : ["No Entries"];
-    const values = sortedKeys.length > 0 ? sortedKeys.map((k) => dateMap[k]) : [0];
+    let labels = [];
+    let values = [];
+
+    if (sortedKeys.length === 0) {
+      labels = ["Baseline", "Live"];
+      values = [0, 0];
+    } else if (sortedKeys.length === 1) {
+      // Provide an opening anchor point so a multi-point trajectory line renders cleanly
+      const singleDate = sortedKeys[0];
+      const prevDateObj = new Date(singleDate);
+      prevDateObj.setDate(prevDateObj.getDate() - 7);
+      const prevDateKey = prevDateObj.toISOString().slice(0, 10);
+      labels = [prevDateKey, singleDate];
+      values = [0, dateMap[singleDate]];
+    } else {
+      labels = sortedKeys;
+      values = sortedKeys.map((k) => dateMap[k]);
+    }
 
     if (trendChartInstance) {
       trendChartInstance.destroy();
@@ -75,7 +139,7 @@ export const charts = {
         labels,
         datasets: [
           {
-            label: "Disbursement ($)",
+            label: "Disbursement (₹)",
             data: values,
             borderColor: "#1C1710", // Pure Ink line
             borderWidth: 2,
@@ -85,8 +149,8 @@ export const charts = {
             pointBackgroundColor: "#1C1710",
             pointBorderColor: "#FDFBF5",
             pointBorderWidth: 1.5,
-            pointRadius: 3.5,
-            pointHoverRadius: 5,
+            pointRadius: 4,
+            pointHoverRadius: 6,
           },
         ],
       },
@@ -115,7 +179,7 @@ export const charts = {
             ticks: {
               color: "#6E6455",
               font: { family: "'IBM Plex Mono', monospace", size: 10 },
-              callback: (val) => `$${Number(val).toLocaleString()}`,
+              callback: (val) => `₹${Number(val).toLocaleString("en-IN")}`,
             },
           },
         },
@@ -200,9 +264,11 @@ export const charts = {
   renderTopVendors(invoices) {
     const vendorMap = {};
     invoices.forEach((inv) => {
-      const vendor = inv.vendor_name || inv.seller || "Unknown";
-      const amt = parseFloat(inv.total_amount) || 0;
-      vendorMap[vendor] = (vendorMap[vendor] || 0) + amt;
+      const vendor = cleanVendorName(inv.vendor_name || inv.seller);
+      if (vendor && vendor !== "Unknown Vendor" && vendor !== "Unknown" && vendor !== "N/A") {
+        const amt = parseFloat(inv.total_amount) || 0;
+        vendorMap[vendor] = (vendorMap[vendor] || 0) + amt;
+      }
     });
 
     const sortedVendors = Object.entries(vendorMap)
@@ -220,7 +286,7 @@ export const charts = {
             <tr>
               <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--ink-muted);">${idx + 1}.</td>
               <td><strong>${escapeHtml(vendor)}</strong></td>
-              <td class="mono-amount" style="text-align:right;">$${amt.toLocaleString(undefined, { minimumFractionDigits: 2 })}</td>
+              <td class="mono-amount" style="text-align:right;">₹${amt.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</td>
             </tr>
           `)
           .join("");
@@ -245,7 +311,7 @@ export const charts = {
         labels: labels.length ? labels : ["No data"],
         datasets: [
           {
-            label: "Spend ($)",
+            label: "Spend (₹)",
             data: data.length ? data : [0],
             backgroundColor: "#1C1710",
             borderColor: "#1C1710",
@@ -267,7 +333,7 @@ export const charts = {
             ticks: {
               color: "#6E6455",
               font: { family: "'IBM Plex Mono', monospace", size: 9 },
-              callback: (val) => `$${Number(val).toLocaleString()}`,
+              callback: (val) => `₹${Number(val).toLocaleString("en-IN")}`,
             },
           },
           y: {

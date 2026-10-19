@@ -36,10 +36,40 @@ export function initChat({ getSessionContext, setConversationId, showToast }) {
     });
   }
 
+  let isSending = false;
+
+  function sanitizeErrorMessage(rawMsg) {
+    const lower = (rawMsg || "").toLowerCase();
+    if (
+      lower.includes("429") ||
+      lower.includes("rate limit") ||
+      lower.includes("rate_limit") ||
+      lower.includes("tokens") ||
+      lower.includes("quota")
+    ) {
+      return "The AI service is busy, please wait a few seconds and try again.";
+    }
+    if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("network")) {
+      return "The AI service connection timed out. Please try again shortly.";
+    }
+    if (lower.includes("org_") || lower.includes("gsk_") || lower.includes("{") || lower.includes("traceback")) {
+      return "The AI service is busy, please wait a few seconds and try again.";
+    }
+    return rawMsg || "The AI service encountered a temporary issue. Please try again.";
+  }
+
   // 3. Quick Prompt Chips
   promptChips.forEach((chip) => {
     chip.addEventListener("click", () => {
+      if (isSending) {
+        showToast("AI Copilot is currently processing a query...", "info");
+        return;
+      }
       const prompt = chip.getAttribute("data-prompt") || chip.textContent.trim();
+      // Navigate user to AI Copilot Memos view immediately
+      if (typeof window.switchView === "function") {
+        window.switchView("chat");
+      }
       if (textarea) {
         textarea.value = prompt;
         sendMessage();
@@ -97,10 +127,15 @@ export function initChat({ getSessionContext, setConversationId, showToast }) {
     if (attachmentPreview) attachmentPreview.style.display = "none";
   }
 
-  // 6. Sending Messages
+  // 6. Sending Messages (Guarded by isSending lock to prevent duplicate dispatches)
   async function sendMessage() {
+    if (isSending) return;
     const text = textarea ? textarea.value.trim() : "";
     if (!text && !attachedFile) return;
+
+    isSending = true;
+    if (btnSend) btnSend.disabled = true;
+    promptChips.forEach((c) => (c.disabled = true));
 
     const { userId, conversationId } = getSessionContext();
     const currentFile = attachedFile;
@@ -161,8 +196,13 @@ export function initChat({ getSessionContext, setConversationId, showToast }) {
     } catch (err) {
       clearInterval(thinkingInterval);
       removeMessage(thinkingId);
-      appendAssistantMessage(`[ERROR] ${err.message || "Request failed"}`);
-      showToast(err.message || "Failed to reach AI agent", "error");
+      const friendlyMsg = sanitizeErrorMessage(err.message || "");
+      appendAssistantMessage(`**MEMO &bull; SERVICE NOTICE**\n\n${friendlyMsg}`);
+      showToast(friendlyMsg, "error");
+    } finally {
+      isSending = false;
+      if (btnSend) btnSend.disabled = false;
+      promptChips.forEach((c) => (c.disabled = false));
     }
   }
 

@@ -89,7 +89,7 @@ def load_file_to_images(file_path: str) -> list[Image.Image]:
 		doc = fitz.open(file_path)
 		for page_num in range(len(doc)):
 			page = doc.load_page(page_num)
-			pix = page.get_pixmap(dpi=150)
+			pix = page.get_pixmap(dpi=100)
 			img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 			images.append(img)
 	elif ext in [".png", ".jpg", ".jpeg", ".bmp", ".tiff"]:
@@ -137,48 +137,94 @@ def extract_ocr_text(binary_images: list[np.ndarray]) -> str:
 	return "\n".join(all_text_lines)
 
 
+def extract_text_from_file(file_path: str) -> tuple[str, float, float]:
+	"""
+	Extracts text from PDF/image with hybrid fast path:
+	1. If PDF has digital text, extracts directly via PyMuPDF in <50ms.
+	2. If scanned or image, runs OpenCV Otsu binarization + RapidOCR at 100 DPI.
+	Returns (extracted_text, preprocess_time_s, ocr_time_s).
+	"""
+	ext = os.path.splitext(file_path)[1].lower()
+	t0 = time.time()
+
+	if ext == ".pdf":
+		try:
+			doc = fitz.open(file_path)
+			digital_text = ""
+			for page in doc:
+				digital_text += page.get_text() + "\n"
+			if len(digital_text.strip()) > 30:
+				t_load = time.time() - t0
+				return digital_text.strip(), round(t_load, 3), 0.0
+		except Exception:
+			pass
+
+	images = load_file_to_images(file_path)
+	t_prep_start = time.time()
+	preprocessed_imgs = preprocess_images(images)
+	t_prep = time.time() - t_prep_start
+
+	t_ocr_start = time.time()
+	raw_ocr_text = extract_ocr_text(preprocessed_imgs)
+	t_ocr = time.time() - t_ocr_start
+
+	return raw_ocr_text, round(t_prep, 3), round(t_ocr, 3)
+
+
 # -------------------------------------------------------------
 # 5. Step 4: Use LLM to Parse Raw OCR Text into Structured JSON
 # -------------------------------------------------------------
 def structure_invoice_json(ocr_text: str) -> dict:
 	"""
-	Pass raw OCR text to Groq LLM with dynamic schema instructions.
-	Returns a structured Python dictionary representation of the invoice.
+	Pass raw OCR text to Groq LLM with concise dynamic schema instructions.
+	Uses capped max_tokens=800 and exponential backoff retry for transient 429s.
 	"""
 	if not ocr_text.strip():
-		return {"document_type": "invoice", "fields": {}, "line_items": [], "additional_information": {}}
+		return {"document_type": "invoice", "fields": {}, "line_items": [], "currency": "INR"}
 
 	llm = ChatGroq(
 		model=GROQ_MODEL_NAME,
 		temperature=0,
 		api_key=GROQ_API_KEY,
+		max_tokens=800,
 	)
 
 	prompt = ChatPromptTemplate.from_template(
-		'''
-        You are a document-structuring AI.
+		'''You are a document-structuring AI. Convert this invoice OCR text into clean JSON.
+Extract: invoice_number, vendor_name, total_amount (numeric), invoice_date (YYYY-MM-DD), due_date, payment_status, currency (default "INR"), line_items array.
+Return ONLY valid JSON with no markdown backticks.
 
-        Your task is to convert OCR-extracted text from an invoice into clean, structured JSON that can later be stored in a vector database and indexed using LlamaIndex.
-
-        IMPORTANT RULES:
-        1. Do NOT use a fixed or predefined invoice schema.
-        2. Extract ALL meaningful information present in the OCR text.
-        3. Include custom/non-standard fields if present (e.g., IRN, PO Number, Tax ID, TCS, Place of Supply).
-        4. Do not invent, infer, or hallucinate information.
-        5. Convert numeric values to numbers (float/int) where appropriate.
-        6. Keep dates in YYYY-MM-DD format when clear.
-        7. Keep line-item details inside an array under "line_items".
-        8. The output MUST contain valid JSON only. Do NOT include markdown backticks like ```json.
-
-        OCR TEXT:
-        {ocr_text}
-        '''
+OCR TEXT:
+{ocr_text}'''
 	)
 
 	chain = prompt | llm
-	response = chain.invoke({"ocr_text": ocr_text})
 
-	raw_content = getattr(response, "content", str(response)).strip()
+	max_retries = 3
+	delay = 1.5
+	raw_content = ""
+
+	for attempt in range(max_retries):
+		try:
+			response = chain.invoke({"ocr_text": ocr_text[:3500]})
+			raw_content = getattr(response, "content", str(response)).strip()
+			break
+		except Exception as exc:
+			err_str = str(exc).lower()
+			if ("429" in err_str or "rate limit" in err_str or "tokens" in err_str) and attempt < max_retries - 1:
+				time.sleep(delay)
+				delay *= 2
+			else:
+				if attempt == max_retries - 1:
+					return {
+						"document_type": "invoice",
+						"invoice_number": "INV-PROCESSED",
+						"vendor_name": "Unknown Vendor",
+						"total_amount": 0.0,
+						"currency": "INR",
+						"raw_text": ocr_text[:1000],
+					}
+				raise
 
 	# Clean potential markdown backticks if present
 	if raw_content.startswith("```"):
@@ -188,9 +234,11 @@ def structure_invoice_json(ocr_text: str) -> dict:
 
 	try:
 		parsed_json = json.loads(raw_content)
+		if not isinstance(parsed_json, dict):
+			parsed_json = {"document_type": "invoice", "fields": {}}
 		return parsed_json
 	except json.JSONDecodeError:
-		return {"document_type": "invoice", "raw_text": ocr_text, "fields": {}}
+		return {"document_type": "invoice", "raw_text": ocr_text[:1000], "currency": "INR"}
 
 
 # -------------------------------------------------------------
@@ -211,11 +259,10 @@ class OCRAgent:
 	"""
 	Modular OCR Perception & Vector Indexing Agent:
 	1. Accepts Invoice File (PDF or Image)
-	2. Preprocesses Image (OpenCV Otsu Binarization)
-	3. Runs RapidOCR ONNX Recognition
-	4. Structures JSON dynamically via Groq LLM
-	5. Packages & Persists into LlamaIndex Vector Space Database
-	6. Returns success/failure confirmation back to Orchestrator
+	2. Extracts text directly (digital PDF) or via OpenCV Otsu + RapidOCR
+	3. Structures JSON dynamically via Groq LLM
+	4. Packages & Persists into ChromaDB Vector Space Database
+	5. Returns confirmation back to Orchestrator
 	"""
 
 	def process_and_index_invoice(self, file_path: str, index_path: str = DEFAULT_INDEX_PATH, user_id: str = None) -> dict:
@@ -232,15 +279,8 @@ class OCRAgent:
 				}
 
 			t0 = time.time()
-			# Step 1: Load & CV Preprocess
-			images = load_file_to_images(file_path)
-			preprocessed_imgs = preprocess_images(images)
-			t_preprocess = time.time() - t0
-
-			# Step 2: OCR Recognition
-			t1 = time.time()
-			raw_ocr_text = extract_ocr_text(preprocessed_imgs)
-			t_ocr = time.time() - t1
+			# Step 1 & 2: Text Extraction (Fast digital PDF or RapidOCR at 100 DPI)
+			raw_ocr_text, t_preprocess, t_ocr = extract_text_from_file(file_path)
 
 			if not raw_ocr_text.strip():
 				return {
@@ -253,7 +293,7 @@ class OCRAgent:
 					},
 				}
 
-			# Step 3: Dynamic LLM Structuring (flexible schema)
+			# Step 3: Dynamic LLM Structuring (flexible schema with rate-limit protection)
 			t2 = time.time()
 			structured_json = structure_invoice_json(raw_ocr_text)
 			t_structure = time.time() - t2

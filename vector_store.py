@@ -130,14 +130,36 @@ def normalize_invoice_data(raw_data: dict, file_name: str = "") -> dict:
 
 	fields = raw_data.get("fields") if isinstance(raw_data.get("fields"), dict) else {}
 
+	def extract_clean_str(v):
+		if v is None:
+			return ""
+		if isinstance(v, dict):
+			for sub_key in ("name", "vendor_name", "company_name", "seller", "title", "vendor"):
+				if v.get(sub_key) and str(v[sub_key]).strip():
+					return str(v[sub_key]).strip()
+			return ""
+		s = str(v).strip()
+		if (s.startswith("{") and s.endswith("}")) or (s.startswith("(") and s.endswith(")")):
+			try:
+				parsed = json.loads(s.replace("'", '"'))
+				if isinstance(parsed, dict):
+					return extract_clean_str(parsed)
+			except Exception:
+				m = re.search(r"['\"](?:name|vendor_name|company|seller)['\"]\s*:\s*['\"]([^'\"]+)['\"]", s, re.IGNORECASE)
+				if m:
+					return m.group(1).strip()
+		return s
+
 	def find_str(*keys, default=""):
 		for k in keys:
-			v = raw_data.get(k)
-			if v is not None and str(v).strip() and str(v).strip().lower() not in ("none", "null", "n/a"):
-				return str(v).strip()
-			v_f = fields.get(k)
-			if v_f is not None and str(v_f).strip() and str(v_f).strip().lower() not in ("none", "null", "n/a"):
-				return str(v_f).strip()
+			if k in raw_data:
+				val = extract_clean_str(raw_data.get(k))
+				if val and val.lower() not in ("none", "null", "n/a", "unknown"):
+					return val
+			if k in fields:
+				val = extract_clean_str(fields.get(k))
+				if val and val.lower() not in ("none", "null", "n/a", "unknown"):
+					return val
 		return default
 
 	def find_float(*keys, default=0.0):
@@ -231,7 +253,7 @@ def normalize_invoice_data(raw_data: dict, file_name: str = "") -> dict:
 	if subtotal == 0.0 and total > 0 and tax == 0.0:
 		subtotal = total
 
-	currency = find_str("currency", "currency_code", "currency_symbol", default="USD")
+	currency = find_str("currency", "currency_code", "currency_symbol", default="INR")
 	payment_status = find_str("payment_status", "status", default="Unpaid")
 
 	return {

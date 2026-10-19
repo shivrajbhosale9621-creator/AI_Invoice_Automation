@@ -260,9 +260,10 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
 
     setText("res-filename", filename);
     setText("res-inv-num", summary.invoice_number);
-    setText("res-vendor", summary.vendor_name);
+    const vendorClean = summary.vendor_name ? (typeof summary.vendor_name === 'object' ? (summary.vendor_name.name || "Unknown") : String(summary.vendor_name)) : "Unknown";
+    setText("res-vendor", vendorClean);
     setText("res-date", summary.invoice_date);
-    setText("res-amount", summary.total_amount ? `$${Number(summary.total_amount).toLocaleString(undefined, { minimumFractionDigits: 2 })}` : "$0.00");
+    setText("res-amount", summary.total_amount ? `₹${Number(summary.total_amount).toLocaleString("en-IN", { minimumFractionDigits: 2 })}` : "₹0.00");
     setText("res-status", summary.payment_status || "Unpaid");
 
     if (processingDocket) processingDocket.style.display = "none";

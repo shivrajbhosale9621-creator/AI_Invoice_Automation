@@ -210,7 +210,10 @@ Interpret follow-up requests using relevant earlier messages, decisions, and too
 - Avoid unnecessary tool calls.
 - Do not substitute assumptions or general knowledge for actual invoice data.
 - Do not claim successful execution without supporting tool results.
-- For requests unrelated to invoice automation, respond briefly and redirect to the system's supported capabilities when appropriate.
+## 9. Currency and Data Presentation Rules
+
+- These are Indian invoices. Always use the Indian Rupee symbol (₹) for monetary amounts, formatted with comma grouping (e.g., ₹1,250.00, ₹50,000.00). Never use dollar ($) signs.
+- When listing vendors or sellers, always output clean, human-readable vendor names. Never display raw Python dictionaries or JSON strings like `{'name': '...'}` or `[object Object]`.
 
 ## Primary Objective
 
@@ -263,11 +266,12 @@ class MainOrchestrator:
         # thread_id for LangGraph checkpointer = conversation_id (stable, unique per conversation)
         self.thread_id = self.conversation_id
 
-        # Build the LLM
+        # Build the LLM with capped max_tokens to prevent 8,000 token TPM exhaustion
         self._llm = ChatGroq(
             model=GROQ_MODEL_NAME,
             api_key=GROQ_API_KEY,
             temperature=0,
+            max_tokens=1000,
         )
 
         # Build specialist agents
@@ -468,7 +472,11 @@ class MainOrchestrator:
                 logger.info("Self-healing recovery succeeded for thread %s", self.thread_id)
             except Exception as retry_exc:
                 logger.error("Self-healing recovery failed for conversation %s: %s", self.conversation_id, retry_exc)
-                final_response = f"I encountered an error processing your request: {exc}"
+                err_text = str(exc).lower() + " " + str(retry_exc).lower()
+                if "429" in err_text or "rate limit" in err_text or "tokens" in err_text:
+                    final_response = "The AI service is busy, please wait a few seconds and try again."
+                else:
+                    final_response = "The AI service encountered a temporary error. Please try again."
 
         # 6. Save assistant response
         save_message(

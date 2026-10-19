@@ -1634,6 +1634,13 @@ body::before {
   outline-offset: 1px;
 }
 
+.password-toggle-btn svg,
+.password-toggle-btn path,
+.password-toggle-btn circle,
+.password-toggle-btn line {
+  pointer-events: none;
+}
+
 .auth-stamp-notice {
   padding: 0.85rem 1rem;
   border-radius: var(--radius-btn);

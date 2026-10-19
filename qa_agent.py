@@ -158,12 +158,13 @@ def node_synthesize_answer(state: QAState) -> dict:
 			history_lines.append(f"{role.capitalize()}: {content}")
 		history_text = "\nPrevious Conversation:\n" + "\n".join(history_lines) + "\n"
 
-	llm = ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL_NAME, temperature=0)
+	llm = ChatGroq(api_key=GROQ_API_KEY, model=GROQ_MODEL_NAME, temperature=0, max_tokens=1000)
 
 	prompt = ChatPromptTemplate.from_template(
 		'''
         You are an expert Invoice QA Agent.
         Answer the user's question using the Global Summary Matrix, Detailed Invoice Chunks, and Conversation History below.
+        Use whatever currency is specified in the invoices ($, ₹, €, etc.) properly. Always present clean vendor names without raw dictionary syntax.
 
         Global Summary Matrix:
         {matrix}
@@ -179,8 +180,15 @@ def node_synthesize_answer(state: QAState) -> dict:
 	)
 
 	chain = prompt | llm
-	response = chain.invoke({"matrix": matrix, "chunks": chunks, "history": history_text, "query": query})
-	answer = getattr(response, "content", str(response)).strip()
+	try:
+		response = chain.invoke({"matrix": matrix, "chunks": chunks, "history": history_text, "query": query})
+		answer = getattr(response, "content", str(response)).strip()
+	except Exception as exc:
+		err_str = str(exc).lower()
+		if "429" in err_str or "rate limit" in err_str or "tokens" in err_str:
+			answer = "The AI service is busy, please wait a few seconds and try again."
+		else:
+			answer = "The AI service encountered a temporary error while formulating the answer. Please try again."
 	return {"final_result": answer}
 
 

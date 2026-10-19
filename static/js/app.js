@@ -424,14 +424,16 @@ function setupAuth() {
   // Password Visibility Toggles
   const passwordToggleBtns = document.querySelectorAll(".password-toggle-btn");
   passwordToggleBtns.forEach((btn) => {
-    btn.addEventListener("click", () => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       const wrapper = btn.closest(".password-input-wrapper");
       if (!wrapper) return;
       const input = wrapper.querySelector("input");
       if (!input) return;
 
-      const isPassword = input.getAttribute("type") === "password";
-      input.setAttribute("type", isPassword ? "text" : "password");
+      const isPassword = input.type === "password";
+      input.type = isPassword ? "text" : "password";
 
       const showIcon = btn.querySelector(".eye-show");
       const hideIcon = btn.querySelector(".eye-hide");
@@ -465,6 +467,14 @@ function setupNavigation() {
   const btnHeaderUpload = document.getElementById("btn-header-upload");
   if (btnHeaderUpload) {
     btnHeaderUpload.addEventListener("click", () => switchView("upload"));
+  }
+
+  const btnDispatchFileInvoice = document.getElementById("btn-dispatch-file-invoice");
+  if (btnDispatchFileInvoice) {
+    btnDispatchFileInvoice.addEventListener("click", (e) => {
+      e.preventDefault();
+      switchView("upload");
+    });
   }
 
   window.switchView = switchView;
@@ -532,8 +542,8 @@ function updateDashboardMetrics(invoices) {
     const amt = parseFloat(inv.total_amount) || 0;
     totalSpend += amt;
 
-    const vendor = inv.vendor_name || inv.seller;
-    if (vendor && vendor !== "Unknown" && vendor !== "N/A") {
+    const vendor = cleanVendorName(inv.vendor_name || inv.seller);
+    if (vendor && vendor !== "Unknown Vendor" && vendor !== "Unknown" && vendor !== "N/A") {
       vendors.add(vendor);
     }
 
@@ -555,8 +565,8 @@ function updateDashboardMetrics(invoices) {
   const elPaidRatio = document.getElementById("stat-paid-ratio");
   const elVendorsCount = document.getElementById("stat-vendors-count");
 
-  if (elTotalSpend) elTotalSpend.textContent = `$${totalSpend.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  if (elAvgSpend) elAvgSpend.textContent = `$${avgSpend.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (elTotalSpend) elTotalSpend.textContent = formatRupee(totalSpend);
+  if (elAvgSpend) elAvgSpend.textContent = formatRupee(avgSpend);
   if (elTotalCount) elTotalCount.textContent = totalCount.toString();
   if (elPaidRatio) elPaidRatio.textContent = `${paidRatio}%`;
   if (elVendorsCount) elVendorsCount.textContent = vendors.size.toString();
@@ -580,7 +590,7 @@ function renderRecentInvoices(invoices) {
   container.innerHTML = recent
     .map((inv) => {
       const invNum = inv.invoice_number || "N/A";
-      const vendor = inv.vendor_name || inv.seller || "Unknown";
+      const vendor = cleanVendorName(inv.vendor_name || inv.seller);
       const date = inv.invoice_date || "N/A";
       const amt = parseFloat(inv.total_amount) || 0;
       const statusClass = getStatusClass(inv.payment_status);
@@ -596,7 +606,7 @@ function renderRecentInvoices(invoices) {
             ${escapeHtml(date)}
           </div>
           <div class="recent-inv-right">
-            <span class="recent-inv-amount">$${amt.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            <span class="recent-inv-amount">${formatRupee(amt)}</span>
             <span class="stamp-badge ${statusClass}">${statusLabel}</span>
           </div>
         </div>
@@ -625,9 +635,10 @@ function renderLedgerTable(invoices) {
   if (state.searchQuery) {
     const q = state.searchQuery.toLowerCase();
     filtered = filtered.filter((inv) => {
+      const vendorClean = cleanVendorName(inv.vendor_name || inv.seller);
       return (
         (inv.invoice_number || "").toLowerCase().includes(q) ||
-        (inv.vendor_name || "").toLowerCase().includes(q) ||
+        vendorClean.toLowerCase().includes(q) ||
         (inv.buyer_name || "").toLowerCase().includes(q) ||
         (inv.file_name || "").toLowerCase().includes(q)
       );
@@ -651,7 +662,7 @@ function renderLedgerTable(invoices) {
     .map((inv) => {
       const docId = inv._doc_id || "";
       const invNum = inv.invoice_number || "N/A";
-      const vendor = inv.vendor_name || inv.seller || "Unknown";
+      const vendor = cleanVendorName(inv.vendor_name || inv.seller);
       const buyer = inv.buyer_name || inv.customer || "N/A";
       const date = inv.invoice_date || "N/A";
       const amt = parseFloat(inv.total_amount) || 0;
@@ -665,7 +676,7 @@ function renderLedgerTable(invoices) {
           <td style="color:var(--ink-muted);">${escapeHtml(buyer)}</td>
           <td style="font-family:var(--font-mono); font-size:0.75rem;">${escapeHtml(date)}</td>
           <td style="font-family:var(--font-mono); font-weight:700; text-align:right;">
-            $${amt.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+            ${formatRupee(amt)}
           </td>
           <td><span class="stamp-badge ${statusClass}">${statusLabel}</span></td>
           <td style="text-align:center;">
@@ -1001,4 +1012,36 @@ function setupCustomChartsModal() {
       }
     });
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Robust Vendor Name Cleaner & Currency Formatter
+// ─────────────────────────────────────────────────────────────────────────────
+export function cleanVendorName(raw) {
+  if (!raw) return "Unknown Vendor";
+  if (typeof raw === "object") {
+    return raw.name || raw.vendor_name || raw.company_name || raw.seller || raw.title || "Unknown Vendor";
+  }
+  let str = String(raw).trim();
+  if (!str || str.toLowerCase() === "unknown" || str.toLowerCase() === "unknown vendor" || str.toLowerCase() === "n/a") {
+    return "Unknown Vendor";
+  }
+  if ((str.startsWith("{") && str.endsWith("}")) || (str.startsWith("(") && str.endsWith(")"))) {
+    try {
+      const normalized = str.replace(/'/g, '"');
+      const parsed = JSON.parse(normalized);
+      if (typeof parsed === "object" && parsed !== null) {
+        return parsed.name || parsed.vendor_name || parsed.company_name || parsed.seller || "Unknown Vendor";
+      }
+    } catch (e) {
+      const match = str.match(/['"](?:name|vendor_name|company|seller)['"]\s*:\s*['"]([^'"]+)['"]/i);
+      if (match && match[1]) return match[1].trim();
+    }
+  }
+  return str;
+}
+
+export function formatRupee(amount) {
+  const num = parseFloat(amount) || 0;
+  return `₹${num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }

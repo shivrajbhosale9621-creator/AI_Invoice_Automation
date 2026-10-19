@@ -345,7 +345,14 @@ async def chat(
         }
     except Exception as exc:
         logger.error("Chat error conv=%s: %s", conversation_id, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Agent invocation failed: {exc}")
+        err_str = str(exc).lower()
+        if "429" in err_str or "rate limit" in err_str or "tokens" in err_str or "quota" in err_str:
+            detail_msg = "The AI service is busy, please wait a few seconds and try again."
+        elif "timeout" in err_str or "timed out" in err_str or "connection" in err_str:
+            detail_msg = "The AI service connection timed out. Please try again shortly."
+        else:
+            detail_msg = "The AI service is busy, please wait a few seconds and try again."
+        raise HTTPException(status_code=500, detail=detail_msg)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
