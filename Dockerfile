@@ -6,10 +6,15 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=5000
 
-# Install minimal OS dependencies for PyMuPDF, OpenCV headless, and ONNX Runtime OpenMP
+# Install minimal OS dependencies for PyMuPDF, OpenCV, and ONNX Runtime OpenMP
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
     libglib2.0-0 \
     libgomp1 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libxcb1 \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
