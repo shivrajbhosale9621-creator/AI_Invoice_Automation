@@ -32,15 +32,16 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
   });
 
   dropzone.addEventListener("drop", (e) => {
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      handleFileUpload(files[0]);
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length > 0) {
+      handleFiles(files);
     }
   });
 
   fileInput.addEventListener("change", (e) => {
-    if (fileInput.files && fileInput.files.length > 0) {
-      handleFileUpload(fileInput.files[0]);
+    const files = Array.from(fileInput.files || []);
+    if (files.length > 0) {
+      handleFiles(files);
     }
   });
 
@@ -53,95 +54,123 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
     });
   }
 
-  async function handleFileUpload(file) {
-    // Validate file extension
+  async function handleFiles(files) {
     const allowed = [".pdf", ".png", ".jpg", ".jpeg", ".bmp", ".tiff"];
-    const ext = "." + file.name.split(".").pop().toLowerCase();
-    if (!allowed.includes(ext)) {
-      showToast(`Unsupported file type '${ext}'. Please upload PDF or image.`, "error");
-      return;
+    const validFiles = [];
+
+    for (const file of files) {
+      const ext = "." + file.name.split(".").pop().toLowerCase();
+      if (!allowed.includes(ext)) {
+        showToast(`Skipping '${file.name}': unsupported file type '${ext}'.`, "error");
+        continue;
+      }
+      if (file.size > 20 * 1024 * 1024) {
+        showToast(`Skipping '${file.name}': exceeds 20MB limit.`, "error");
+        continue;
+      }
+      validFiles.push(file);
     }
 
-    // Validate size (max 20MB)
-    if (file.size > 20 * 1024 * 1024) {
-      showToast("File exceeds the 20MB maximum limit.", "error");
+    if (validFiles.length === 0) {
+      fileInput.value = "";
       return;
     }
-
-    const { userId, conversationId } = getSessionContext();
 
     // Show processing docket
     dropzone.style.display = "none";
     if (resultCard) resultCard.style.display = "none";
     if (processingDocket) processingDocket.style.display = "block";
 
-    const docketFileName = document.getElementById("docket-file-name");
-    if (docketFileName) docketFileName.textContent = file.name;
+    let lastRes = null;
+    let lastFilename = "";
+    let processedCount = 0;
 
-    // Reset stages
-    resetDocketStages();
+    for (let i = 0; i < validFiles.length; i++) {
+      const file = validFiles[i];
+      const batchLabel = validFiles.length > 1 ? ` (${i + 1} of ${validFiles.length})` : "";
 
-    // Start elapsed timer
-    const startTime = Date.now();
-    const timerInterval = setInterval(() => {
-      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
-      const timerEl = document.getElementById("docket-timer");
-      if (timerEl) timerEl.textContent = `ELAPSED: ${elapsedSec}s`;
-    }, 100);
+      const docketFileName = document.getElementById("docket-file-name");
+      if (docketFileName) docketFileName.textContent = `${file.name}${batchLabel}`;
 
-    // Stage 1: Received immediately
-    setStageStatus("stage-received", "completed", "+0.1s");
+      // Reset stages
+      resetDocketStages();
 
-    // Stages 2 to 5: Honest indeterminate state with spinners until real server response
-    setStageStatus("stage-ocr", "active");
-    setStageStatus("stage-extracted", "active");
-    setStageStatus("stage-validated", "active");
-    setStageStatus("stage-filed", "active");
-    setIndeterminateProgress(true);
+      // Start elapsed timer
+      const startTime = Date.now();
+      const timerInterval = setInterval(() => {
+        const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+        const timerEl = document.getElementById("docket-timer");
+        if (timerEl) timerEl.textContent = `ELAPSED: ${elapsedSec}s`;
+      }, 100);
 
-    try {
-      showToast(`Filing "${file.name}" in ledger...`, "info");
-      const res = await api.uploadInvoice(file, conversationId, userId);
+      // Stage 1: Received immediately
+      setStageStatus("stage-received", "completed", "+0.1s");
 
-      clearInterval(timerInterval);
-      setIndeterminateProgress(false);
-      setProgress(100);
+      // Stages 2 to 5: Indeterminate state with spinners
+      setStageStatus("stage-ocr", "active");
+      setStageStatus("stage-extracted", "active");
+      setStageStatus("stage-validated", "active");
+      setStageStatus("stage-filed", "active");
+      setIndeterminateProgress(true);
 
-      const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-      const timerEl = document.getElementById("docket-timer");
-      if (timerEl) timerEl.textContent = `COMPLETED IN ${totalElapsed}s`;
+      const { userId, conversationId } = getSessionContext();
 
-      const timings = res.timings || {};
-      const tPre = Number(timings.preprocess_s || 0.2);
-      const tOcr = Number(timings.ocr_s || 2.4);
-      const tStruct = Number(timings.structuring_s || 5.0);
-      const tTotal = Number(timings.total_s || totalElapsed);
+      try {
+        showToast(`Processing invoice ${i + 1}/${validFiles.length}: "${file.name}"...`, "info");
+        const res = await api.uploadInvoice(file, conversationId, userId);
 
-      // Stamp true server timings upon actual completion
-      setStageStatus("stage-received", "completed", `+${tPre.toFixed(1)}s`);
-      setStageStatus("stage-ocr", "completed", `+${(tPre + tOcr).toFixed(1)}s`);
-      setStageStatus("stage-extracted", "completed", `+${(tPre + tOcr + tStruct).toFixed(1)}s`);
-      setStageStatus("stage-validated", "completed", `+${Math.min(tTotal, tPre + tOcr + tStruct + 0.1).toFixed(1)}s`);
-      setStageStatus("stage-filed", "completed", `+${tTotal.toFixed(1)}s`);
+        clearInterval(timerInterval);
+        setIndeterminateProgress(false);
+        setProgress(100);
 
-      showToast(`Successfully filed invoice "${file.name}" in ${tTotal.toFixed(1)}s!`, "success");
+        const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(2);
+        const timerEl = document.getElementById("docket-timer");
+        if (timerEl) timerEl.textContent = `COMPLETED IN ${totalElapsed}s`;
 
-      // Render structured result after brief visual confirmation
-      setTimeout(() => {
-        renderExtractionResult(res, file.name);
-      }, 600);
+        const timings = res.timings || {};
+        const tPre = Number(timings.preprocess_s || 0.2);
+        const tOcr = Number(timings.ocr_s || 2.4);
+        const tStruct = Number(timings.structuring_s || 5.0);
+        const tTotal = Number(timings.total_s || totalElapsed);
 
-      // Notify parent to refresh dashboard KPIs & table
-      if (typeof onUploadSuccess === "function") {
-        onUploadSuccess();
+        setStageStatus("stage-received", "completed", `+${tPre.toFixed(1)}s`);
+        setStageStatus("stage-ocr", "completed", `+${(tPre + tOcr).toFixed(1)}s`);
+        setStageStatus("stage-extracted", "completed", `+${(tPre + tOcr + tStruct).toFixed(1)}s`);
+        setStageStatus("stage-validated", "completed", `+${Math.min(tTotal, tPre + tOcr + tStruct + 0.1).toFixed(1)}s`);
+        setStageStatus("stage-filed", "completed", `+${tTotal.toFixed(1)}s`);
+
+        showToast(`Filed "${file.name}" in ledger (${tTotal.toFixed(1)}s)`, "success");
+        lastRes = res;
+        lastFilename = file.name;
+        processedCount++;
+
+        // If batch upload, briefly pause to show docket completion before next
+        if (i < validFiles.length - 1) {
+          await new Promise((r) => setTimeout(r, 600));
+        }
+      } catch (err) {
+        clearInterval(timerInterval);
+        setIndeterminateProgress(false);
+        showDocketError(err.message || `Failed to process ${file.name}`);
+        showToast(`Error processing "${file.name}": ${err.message}`, "error");
+        if (i < validFiles.length - 1) {
+          await new Promise((r) => setTimeout(r, 1200));
+        }
       }
-    } catch (err) {
-      setIndeterminateProgress(false);
-      clearInterval(timerInterval);
-      showDocketError(err.message || "Invoice processing failed.");
-      showToast(err.message || "Invoice processing failed.", "error");
-    } finally {
-      fileInput.value = "";
+    }
+
+    fileInput.value = "";
+
+    // Refresh ledger data
+    if (typeof onUploadSuccess === "function") {
+      onUploadSuccess();
+    }
+
+    // Render structured result after brief visual confirmation
+    if (lastRes) {
+      setTimeout(() => {
+        renderExtractionResult(lastRes, lastFilename);
+      }, 700);
     }
   }
 

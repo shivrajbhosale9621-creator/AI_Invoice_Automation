@@ -1,9 +1,86 @@
 /**
  * api.js — Centralized HTTP Client for AutoInvoice Intelligence FastAPI Service
  * All fetch operations include credentials: "include" for secure httpOnly cookie authentication.
+ * Includes automatic token rotation on 401 using the 7-day refresh token.
  */
 
 const API_BASE = "";
+
+let isRefreshing = false;
+let refreshSubscribers = [];
+
+function subscribeTokenRefresh(cb) {
+  refreshSubscribers.push(cb);
+}
+
+function onRefreshed(error) {
+  refreshSubscribers.forEach((cb) => cb(error));
+  refreshSubscribers = [];
+}
+
+/**
+ * Robust fetch wrapper:
+ * - Injects credentials: "include"
+ * - On 401, attempts transparent token refresh via /auth/refresh and retries
+ * - Broadcasts 'session-expired' if refresh fails
+ */
+async function request(url, options = {}) {
+  const mergedOptions = {
+    ...options,
+    credentials: "include",
+  };
+
+  let res = await fetch(url, mergedOptions);
+
+  const isAuthEndpoint =
+    url.includes("/auth/login") ||
+    url.includes("/auth/signup") ||
+    url.includes("/auth/refresh") ||
+    url.includes("/auth/verify-otp") ||
+    url.includes("/auth/resend-otp") ||
+    url.includes("/auth/forgot-password") ||
+    url.includes("/auth/reset-password");
+
+  if (res.status === 401 && !isAuthEndpoint) {
+    if (!isRefreshing) {
+      isRefreshing = true;
+      try {
+        const refreshRes = await fetch(`${API_BASE}/auth/refresh`, {
+          method: "POST",
+          credentials: "include",
+        });
+
+        if (refreshRes.ok) {
+          isRefreshing = false;
+          onRefreshed(null);
+          return await fetch(url, mergedOptions);
+        } else {
+          isRefreshing = false;
+          onRefreshed(new Error("Refresh failed"));
+          window.dispatchEvent(new CustomEvent("session-expired"));
+          return res;
+        }
+      } catch (err) {
+        isRefreshing = false;
+        onRefreshed(err);
+        window.dispatchEvent(new CustomEvent("session-expired"));
+        return res;
+      }
+    } else {
+      return new Promise((resolve) => {
+        subscribeTokenRefresh((err) => {
+          if (!err) {
+            resolve(fetch(url, mergedOptions));
+          } else {
+            resolve(res);
+          }
+        });
+      });
+    }
+  }
+
+  return res;
+}
 
 export const api = {
   /**
@@ -11,7 +88,7 @@ export const api = {
    */
   async getHealth() {
     try {
-      const res = await fetch(`${API_BASE}/api/health`, { credentials: "include" });
+      const res = await request(`${API_BASE}/api/health`);
       return await res.json();
     } catch (err) {
       console.error("Health probe failed:", err);
@@ -27,9 +104,8 @@ export const api = {
    * Get active user session info from access token cookie
    */
   async getMe() {
-    const res = await fetch(`${API_BASE}/auth/me`, {
+    const res = await request(`${API_BASE}/auth/me`, {
       method: "GET",
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -42,11 +118,10 @@ export const api = {
    * Register a new user
    */
   async signup({ email, password }) {
-    const res = await fetch(`${API_BASE}/auth/signup`, {
+    const res = await request(`${API_BASE}/auth/signup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -59,11 +134,10 @@ export const api = {
    * Verify 6-digit OTP code
    */
   async verifyOtp({ email, code, purpose = "email_verification" }) {
-    const res = await fetch(`${API_BASE}/auth/verify-otp`, {
+    const res = await request(`${API_BASE}/auth/verify-otp`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, code, purpose }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -76,11 +150,10 @@ export const api = {
    * Resend OTP code
    */
   async resendOtp({ email, purpose = "email_verification" }) {
-    const res = await fetch(`${API_BASE}/auth/resend-otp`, {
+    const res = await request(`${API_BASE}/auth/resend-otp`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, purpose }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -93,11 +166,10 @@ export const api = {
    * Log in user
    */
   async login({ email, password }) {
-    const res = await fetch(`${API_BASE}/auth/login`, {
+    const res = await request(`${API_BASE}/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -111,9 +183,8 @@ export const api = {
    */
   async logout() {
     try {
-      const res = await fetch(`${API_BASE}/auth/logout`, {
+      const res = await request(`${API_BASE}/auth/logout`, {
         method: "POST",
-        credentials: "include",
       });
       return await res.json();
     } catch (err) {
@@ -125,11 +196,10 @@ export const api = {
    * Request password reset code
    */
   async forgotPassword({ email }) {
-    const res = await fetch(`${API_BASE}/auth/forgot-password`, {
+    const res = await request(`${API_BASE}/auth/forgot-password`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -142,11 +212,10 @@ export const api = {
    * Reset password with OTP
    */
   async resetPassword({ email, code, new_password }) {
-    const res = await fetch(`${API_BASE}/auth/reset-password`, {
+    const res = await request(`${API_BASE}/auth/reset-password`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, code, new_password }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) {
@@ -180,9 +249,7 @@ export const api = {
    */
   async getInvoices(includeIds = true) {
     try {
-      const res = await fetch(`${API_BASE}/api/invoices?include_ids=${includeIds}`, {
-        credentials: "include",
-      });
+      const res = await request(`${API_BASE}/api/invoices?include_ids=${includeIds}`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load invoices");
       return data;
@@ -202,9 +269,8 @@ export const api = {
       if (userId) params.append("user_id", userId);
 
       const qs = params.toString() ? `?${params.toString()}` : "";
-      const res = await fetch(`${API_BASE}/api/invoice/${encodeURIComponent(docId)}${qs}`, {
+      const res = await request(`${API_BASE}/api/invoice/${encodeURIComponent(docId)}${qs}`, {
         method: "DELETE",
-        credentials: "include",
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Deletion failed");
@@ -225,10 +291,9 @@ export const api = {
       if (conversationId) formData.append("conversation_id", conversationId);
       if (userId) formData.append("user_id", userId);
 
-      const res = await fetch(`${API_BASE}/api/invoice/upload`, {
+      const res = await request(`${API_BASE}/api/invoice/upload`, {
         method: "POST",
         body: formData,
-        credentials: "include",
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Upload failed");
@@ -264,11 +329,10 @@ export const api = {
         });
       }
 
-      const res = await fetch(`${API_BASE}/api/chat`, {
+      const res = await request(`${API_BASE}/api/chat`, {
         method: "POST",
         headers,
         body,
-        credentials: "include",
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Chat agent request failed");
@@ -284,9 +348,7 @@ export const api = {
    */
   async getConversations(userId) {
     try {
-      const res = await fetch(`${API_BASE}/api/chat/conversations`, {
-        credentials: "include",
-      });
+      const res = await request(`${API_BASE}/api/chat/conversations`);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load conversations");
       return data;
@@ -301,9 +363,8 @@ export const api = {
    */
   async getChatHistory(conversationId, userId, limit = 50) {
     try {
-      const res = await fetch(
-        `${API_BASE}/api/chat/history/${encodeURIComponent(conversationId)}?limit=${limit}`,
-        { credentials: "include" }
+      const res = await request(
+        `${API_BASE}/api/chat/history/${encodeURIComponent(conversationId)}?limit=${limit}`
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to load chat history");
@@ -325,7 +386,7 @@ export const api = {
    * Get all pinned dashboard custom charts for current user
    */
   async getDashboardCharts() {
-    const res = await fetch(`${API_BASE}/api/dashboard/charts`, { credentials: "include" });
+    const res = await request(`${API_BASE}/api/dashboard/charts`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Failed to load custom charts");
     return data;
@@ -335,11 +396,10 @@ export const api = {
    * Create and pin a new custom chart from prompt
    */
   async createDashboardChart(prompt, title = "") {
-    const res = await fetch(`${API_BASE}/api/dashboard/charts`, {
+    const res = await request(`${API_BASE}/api/dashboard/charts`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt, title }),
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Failed to generate custom chart");
@@ -350,9 +410,8 @@ export const api = {
    * Delete a pinned chart
    */
   async deleteDashboardChart(chartId) {
-    const res = await fetch(`${API_BASE}/api/dashboard/charts/${encodeURIComponent(chartId)}`, {
+    const res = await request(`${API_BASE}/api/dashboard/charts/${encodeURIComponent(chartId)}`, {
       method: "DELETE",
-      credentials: "include",
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Failed to delete custom chart");

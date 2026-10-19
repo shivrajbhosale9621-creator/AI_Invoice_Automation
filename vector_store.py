@@ -101,6 +101,158 @@ def load_index(index_path: str = DEFAULT_CHROMA_PATH):
 	return get_collection(path=index_path)
 
 
+import re
+
+def parse_numeric(val: Any, default: float = 0.0) -> float:
+	"""Sanitize and parse numeric currency or float values."""
+	if val is None:
+		return default
+	if isinstance(val, (int, float)):
+		return float(val)
+	val_str = str(val).strip()
+	if not val_str or val_str.lower() in ("n/a", "none", "null", "unknown", "-"):
+		return default
+	# Remove currency symbols ($, €, £, ¥, ₹), commas, spaces
+	cleaned = re.sub(r"[^\d.-]", "", val_str)
+	try:
+		return float(cleaned)
+	except (ValueError, TypeError):
+		return default
+
+
+def normalize_invoice_data(raw_data: dict, file_name: str = "") -> dict:
+	"""
+	Robust multi-schema normalizer for invoice dictionaries extracted by LLMs or OCR.
+	Handles nested 'fields', varied vendor/customer synonyms, currency strings, and missing fields.
+	"""
+	if not isinstance(raw_data, dict):
+		raw_data = {}
+
+	fields = raw_data.get("fields") if isinstance(raw_data.get("fields"), dict) else {}
+
+	def find_str(*keys, default=""):
+		for k in keys:
+			v = raw_data.get(k)
+			if v is not None and str(v).strip() and str(v).strip().lower() not in ("none", "null", "n/a"):
+				return str(v).strip()
+			v_f = fields.get(k)
+			if v_f is not None and str(v_f).strip() and str(v_f).strip().lower() not in ("none", "null", "n/a"):
+				return str(v_f).strip()
+		return default
+
+	def find_float(*keys, default=0.0):
+		for k in keys:
+			if k in raw_data and raw_data[k] is not None:
+				amt = parse_numeric(raw_data[k], default=default)
+				if amt != 0.0:
+					return amt
+			if k in fields and fields[k] is not None:
+				amt = parse_numeric(fields[k], default=default)
+				if amt != 0.0:
+					return amt
+		return default
+
+	# 1. Invoice Number
+	inv_num = find_str(
+		"invoice_number", "invoice_no", "inv_number", "inv_no",
+		"invoice_id", "bill_number", "bill_no", "receipt_no",
+		"order_number", "order_no", "invoice_num", default=""
+	)
+	if not inv_num:
+		if file_name:
+			base = os.path.splitext(os.path.basename(file_name))[0]
+			inv_num = base
+		else:
+			inv_num = "N/A"
+
+	# 2. Vendor / Seller
+	vendor = find_str(
+		"vendor_name", "vendor", "seller", "seller_name",
+		"company", "company_name", "merchant", "biller",
+		"from", "issuer", "store", "store_name", default="Unknown Vendor"
+	)
+
+	# 3. Buyer / Customer
+	buyer = find_str(
+		"buyer_name", "buyer", "customer", "customer_name",
+		"client", "client_name", "bill_to", "recipient", default="N/A"
+	)
+
+	# 4. Dates
+	inv_date = find_str(
+		"invoice_date", "date", "issue_date", "billing_date",
+		"created_date", "inv_date", "order_date", default="N/A"
+	)
+	due_date = find_str(
+		"due_date", "payment_due", "payment_due_date", "expiry_date", default=""
+	)
+
+	# 5. Addresses
+	vendor_addr = find_str("vendor_address", "seller_address", "company_address", default="")
+	buyer_addr = find_str("buyer_address", "customer_address", "client_address", "shipping_address", default="")
+
+	# 6. Line Items
+	line_items = (
+		raw_data.get("line_items") or
+		raw_data.get("items") or
+		fields.get("line_items") or
+		fields.get("items") or
+		[]
+	)
+	if isinstance(line_items, dict):
+		line_items = [line_items]
+	elif not isinstance(line_items, list):
+		line_items = []
+
+	# 7. Financial amounts
+	subtotal = find_float("subtotal", "sub_total", "amount_before_tax", "net_amount", default=0.0)
+	tax = find_float("tax", "vat", "gst", "tax_amount", "total_tax", default=0.0)
+	discount = find_float("discount", "discount_amount", "rebate", default=0.0)
+	total = find_float(
+		"total_amount", "grand_total", "total", "amount_due",
+		"final_total", "net_total", "balance_due", "total_due", "amount", default=0.0
+	)
+
+	# Fallback: if total is still 0.0, attempt to sum line items
+	if total == 0.0 and line_items:
+		items_sum = 0.0
+		for it in line_items:
+			if isinstance(it, dict):
+				it_total = parse_numeric(it.get("total") or it.get("total_amount") or it.get("amount") or 0.0)
+				if it_total > 0:
+					items_sum += it_total
+				else:
+					qty = parse_numeric(it.get("quantity") or it.get("qty") or 1.0)
+					price = parse_numeric(it.get("unit_price") or it.get("price") or 0.0)
+					items_sum += qty * price
+		if items_sum > 0:
+			total = round(items_sum, 2)
+
+	if subtotal == 0.0 and total > 0 and tax == 0.0:
+		subtotal = total
+
+	currency = find_str("currency", "currency_code", "currency_symbol", default="USD")
+	payment_status = find_str("payment_status", "status", default="Unpaid")
+
+	return {
+		"invoice_number": inv_num,
+		"vendor_name": vendor,
+		"vendor_address": vendor_addr,
+		"buyer_name": buyer,
+		"buyer_address": buyer_addr,
+		"invoice_date": inv_date,
+		"due_date": due_date,
+		"total_amount": total,
+		"subtotal": subtotal,
+		"tax": tax,
+		"discount": discount,
+		"currency": currency,
+		"payment_status": payment_status,
+		"line_items": line_items,
+		"items": line_items,
+	}
+
+
 # -------------------------------------------------------------
 # 3. Extracting Invoices & Data Normalization
 # -------------------------------------------------------------
@@ -146,21 +298,15 @@ def get_all_invoices(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id:
 		for k, v in meta.items():
 			parsed.setdefault(k, v)
 
-		parsed["_doc_id"] = doc_id
-		if "file_name" in meta:
-			parsed.setdefault("file_name", meta["file_name"])
+		file_name = meta.get("file_name") or parsed.get("file_name", "")
+		normalized = normalize_invoice_data(parsed, file_name=file_name)
 
-		# Flatten common nested fields if present
-		fields = parsed.get("fields", {}) if isinstance(parsed.get("fields"), dict) else {}
-		parsed.setdefault("invoice_number", fields.get("invoice_number") or parsed.get("invoice_id") or meta.get("invoice_number") or "N/A")
-		parsed.setdefault("vendor_name", fields.get("vendor_name") or parsed.get("seller") or meta.get("vendor_name") or "Unknown")
-		parsed.setdefault("buyer_name", fields.get("buyer_name") or parsed.get("customer") or meta.get("buyer_name") or "N/A")
-		parsed.setdefault("invoice_date", fields.get("invoice_date") or parsed.get("date") or meta.get("invoice_date") or "N/A")
-		parsed.setdefault("total_amount", fields.get("total_amount") or parsed.get("grand_total") or meta.get("total_amount") or 0.0)
-		parsed.setdefault("currency", fields.get("currency") or meta.get("currency") or "USD")
-		parsed.setdefault("payment_status", fields.get("payment_status") or meta.get("payment_status") or "Unpaid")
+		# Preserve all original parsed keys, overlaid with normalized values
+		res_dict = {**parsed, **normalized}
+		res_dict["_doc_id"] = doc_id
+		res_dict["file_name"] = file_name
 
-		invoices.append(parsed)
+		invoices.append(res_dict)
 
 	return invoices
 
@@ -183,21 +329,21 @@ def get_all_invoices_df(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_
 
 	records = []
 	for inv in invoices:
-		fields = inv.get("fields", {}) if isinstance(inv.get("fields"), dict) else {}
-		inv_num = inv.get("invoice_number") or fields.get("invoice_number") or inv.get("invoice_id") or "N/A"
-		vendor = inv.get("vendor_name") or fields.get("vendor_name") or inv.get("seller") or "Unknown"
-		buyer = inv.get("buyer_name") or fields.get("buyer_name") or inv.get("customer") or "N/A"
-		date = inv.get("invoice_date") or fields.get("invoice_date") or inv.get("date") or "N/A"
-		amount = inv.get("total_amount") or fields.get("total_amount") or inv.get("grand_total") or 0.0
-		currency = inv.get("currency") or fields.get("currency") or "USD"
-		status = inv.get("payment_status") or fields.get("payment_status") or "Unpaid"
+		norm = normalize_invoice_data(inv, file_name=inv.get("file_name", ""))
+		inv_num = norm["invoice_number"]
+		vendor = norm["vendor_name"]
+		buyer = norm["buyer_name"]
+		date = norm["invoice_date"]
+		amount = norm["total_amount"]
+		currency = norm["currency"]
+		status = norm["payment_status"]
 
 		records.append({
 			"invoice_number": str(inv_num).strip(),
 			"vendor_name": str(vendor).strip(),
 			"buyer_name": str(buyer).strip(),
 			"invoice_date": str(date).strip(),
-			"total_amount": float(amount) if str(amount).replace(".", "", 1).isdigit() else 0.0,
+			"total_amount": float(amount),
 			"currency": str(currency).strip(),
 			"payment_status": str(status).strip(),
 		})
@@ -287,24 +433,26 @@ def save_invoice_to_vector_store(
 	"""
 	col = get_collection(path=index_path)
 
-	fields = structured_json.get("fields", {}) if isinstance(structured_json.get("fields"), dict) else {}
-	inv_num = fields.get("invoice_number") or structured_json.get("invoice_number", "N/A")
-	seller = fields.get("vendor_name") or fields.get("seller") or structured_json.get("vendor_name", "Unknown")
-	buyer = fields.get("buyer_name") or fields.get("customer") or structured_json.get("buyer_name", "N/A")
-	date = fields.get("invoice_date") or fields.get("date") or structured_json.get("invoice_date", "N/A")
-	grand_total = fields.get("total_amount") or fields.get("grand_total") or structured_json.get("total_amount", 0.0)
-	currency = fields.get("currency") or structured_json.get("currency", "USD")
-	status = fields.get("payment_status") or structured_json.get("payment_status", "Unpaid")
+	file_name = os.path.basename(file_path)
+	norm = normalize_invoice_data(structured_json, file_name=file_name)
+
+	inv_num = norm["invoice_number"]
+	seller = norm["vendor_name"]
+	buyer = norm["buyer_name"]
+	date = norm["invoice_date"]
+	grand_total = norm["total_amount"]
+	currency = norm["currency"]
+	status = norm["payment_status"]
 
 	# Prepare clean primitive metadata for ChromaDB (strings, floats, ints, bools only)
 	metadata = {
 		"document_type": str(structured_json.get("document_type", "invoice")),
-		"file_name": os.path.basename(file_path),
+		"file_name": file_name,
 		"invoice_number": str(inv_num).strip(),
 		"vendor_name": str(seller).strip(),
 		"buyer_name": str(buyer).strip(),
 		"invoice_date": str(date).strip(),
-		"total_amount": float(grand_total) if str(grand_total).replace(".", "", 1).isdigit() else 0.0,
+		"total_amount": float(grand_total),
 		"currency": str(currency).strip(),
 		"payment_status": str(status).strip(),
 		"user_id": str(user_id) if user_id else "",
@@ -317,7 +465,7 @@ def save_invoice_to_vector_store(
 	else:
 		doc_id = f"inv_{uuid.uuid4().hex[:12]}"
 
-	doc_text = json.dumps(structured_json, indent=2)
+	doc_text = json.dumps({**structured_json, **norm}, indent=2)
 
 	col.upsert(
 		documents=[doc_text],
@@ -343,21 +491,26 @@ def save_invoice_to_vector_store(
 					user_id=excluded.user_id,
 					vendor_name=excluded.vendor_name,
 					invoice_number=excluded.invoice_number,
-					total_amount=excluded.total_amount
+					total_amount=excluded.total_amount,
+					items=excluded.items,
+					invoice_date=excluded.invoice_date,
+					subtotal=excluded.subtotal,
+					tax=excluded.tax,
+					discount=excluded.discount
 			""", (
 				u_clean,
-				os.path.basename(file_path),
+				file_name,
 				str(seller).strip(),
-				str(fields.get("vendor_address") or "").strip(),
+				str(norm.get("vendor_address") or "").strip(),
 				str(buyer).strip(),
-				str(fields.get("buyer_address") or "").strip(),
+				str(norm.get("buyer_address") or "").strip(),
 				str(inv_num).strip(),
 				str(date).strip(),
-				json.dumps(structured_json.get("line_items", [])),
-				float(fields.get("subtotal") or 0.0),
-				float(fields.get("tax") or 0.0),
-				float(fields.get("discount") or 0.0),
-				float(grand_total) if str(grand_total).replace(".", "", 1).isdigit() else 0.0,
+				json.dumps(norm.get("line_items", [])),
+				float(norm.get("subtotal") or 0.0),
+				float(norm.get("tax") or 0.0),
+				float(norm.get("discount") or 0.0),
+				float(grand_total),
 			))
 			conn.commit()
 			conn.close()

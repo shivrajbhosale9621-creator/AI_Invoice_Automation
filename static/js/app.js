@@ -96,20 +96,33 @@ document.addEventListener("DOMContentLoaded", async () => {
 // Authentication Folio Controller
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function checkAuthSession() {
-  const authOverlay = document.getElementById("auth-overlay");
+export function setAuthState(user) {
+  state.user = user;
+  const userBadgeContainer = document.getElementById("user-badge-container");
   const userEmailDisplay = document.getElementById("user-display-email");
+  const authOverlay = document.getElementById("auth-overlay");
 
+  if (user) {
+    state.userId = user.id;
+    localStorage.setItem("invoice_app_user_id", user.id);
+    if (userEmailDisplay) userEmailDisplay.textContent = user.email || "";
+    if (userBadgeContainer) userBadgeContainer.style.display = "flex";
+    if (authOverlay) authOverlay.classList.add("hidden");
+  } else {
+    state.userId = "default_user";
+    localStorage.removeItem("invoice_app_user_id");
+    if (userEmailDisplay) userEmailDisplay.textContent = "";
+    if (userBadgeContainer) userBadgeContainer.style.display = "none";
+    if (authOverlay) authOverlay.classList.remove("hidden");
+    showAuthScreen("login");
+  }
+}
+
+async function checkAuthSession() {
   try {
     const res = await api.getMe();
     if (res && res.status === "success" && res.user) {
-      state.user = res.user;
-      state.userId = res.user.id;
-      localStorage.setItem("invoice_app_user_id", res.user.id);
-
-      if (userEmailDisplay) userEmailDisplay.textContent = res.user.email;
-      if (authOverlay) authOverlay.classList.add("hidden");
-
+      setAuthState(res.user);
       await refreshData();
       return;
     }
@@ -117,9 +130,8 @@ async function checkAuthSession() {
     console.warn("User session unauthenticated, displaying login folio:", err);
   }
 
-  // Not authenticated: reveal auth overlay on login screen
-  if (authOverlay) authOverlay.classList.remove("hidden");
-  showAuthScreen("login");
+  // Not authenticated: cleanly reset visual state and show login screen
+  setAuthState(null);
 }
 
 function showAuthScreen(screenName) {
@@ -208,17 +220,18 @@ function setupAuth() {
   document.getElementById("btn-logout")?.addEventListener("click", async () => {
     try {
       await api.logout();
-      state.user = null;
-      state.userId = "default_user";
-      localStorage.removeItem("invoice_app_user_id");
-
-      const authOverlay = document.getElementById("auth-overlay");
-      if (authOverlay) authOverlay.classList.remove("hidden");
-      showAuthScreen("login");
+      setAuthState(null);
       showToast("Auditor folio logged out.", "info");
     } catch (err) {
+      setAuthState(null);
       showToast("Error during logout.", "error");
     }
+  });
+
+  // Session expired event from api.js interceptor
+  window.addEventListener("session-expired", () => {
+    setAuthState(null);
+    showToast("Session expired. Please sign in again.", "info");
   });
 
   // Login Form
@@ -235,14 +248,7 @@ function setupAuth() {
       try {
         const res = await api.login({ email, password });
         if (res.status === "success") {
-          state.user = res.user;
-          state.userId = res.user.id;
-          localStorage.setItem("invoice_app_user_id", res.user.id);
-
-          const userEmailDisplay = document.getElementById("user-display-email");
-          if (userEmailDisplay) userEmailDisplay.textContent = res.user.email;
-
-          document.getElementById("auth-overlay")?.classList.add("hidden");
+          setAuthState(res.user);
           showToast("Authorized session established.", "success");
           await refreshData();
         }
@@ -335,14 +341,7 @@ function setupAuth() {
           showToast("Account verified successfully.", "success");
           // Re-fetch profile to set authenticated user state
           const meRes = await api.getMe();
-          state.user = meRes.user;
-          state.userId = meRes.user.id;
-          localStorage.setItem("invoice_app_user_id", meRes.user.id);
-
-          const userEmailDisplay = document.getElementById("user-display-email");
-          if (userEmailDisplay) userEmailDisplay.textContent = meRes.user.email;
-
-          document.getElementById("auth-overlay")?.classList.add("hidden");
+          setAuthState(meRes.user);
           await refreshData();
         }
       } catch (err) {
@@ -516,8 +515,7 @@ async function refreshData() {
     }
   } catch (err) {
     if (err && (err.status === 401 || (err.message && err.message.includes("401")))) {
-      document.getElementById("auth-overlay")?.classList.remove("hidden");
-      showAuthScreen("login");
+      setAuthState(null);
     } else {
       showToast("Failed to retrieve ledger entries.", "error");
     }

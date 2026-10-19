@@ -20,8 +20,7 @@ export function initChat({ getSessionContext, setConversationId, showToast }) {
 
   let attachedFile = null;
 
-  // 1. Initial Load of user conversations
-  loadConversations();
+  // Conversations will be loaded via window.chatController.loadConversations() once authenticated.
 
   // 2. New Chat Button
   if (btnNewChat) {

@@ -14,13 +14,17 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
 from werkzeug.utils import secure_filename
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Centralized config (sets environment variables before ChromaDB/ONNX)
 from config import DEFAULT_INBOX_DIR, CHAT_DB_PATH
 from app.core.config import settings
+from app.core.database import get_db
 from app.core.rate_limiter import limiter, rate_limit_handler
 from app.core.security import get_current_user
 from app.models.user import User
+from app.models.invoice import Invoice
 from app.routers.auth import router as auth_router
 
 from chat_store import (
@@ -37,6 +41,7 @@ from vector_store import (
     get_all_invoices,
     get_all_invoices_with_ids,
     delete_invoice,
+    normalize_invoice_data,
 )
 from ocr_engine import OCRAgent
 from graph_agent import GraphAgent
@@ -228,8 +233,9 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
-# Mount Authentication Router under /auth
+# Mount Authentication Router under both /auth and /api/auth
 app.include_router(auth_router)
+app.include_router(auth_router, prefix="/api")
 
 # Mount Static assets
 static_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "static")
@@ -393,10 +399,11 @@ async def upload_invoice(
         )
 
     extracted = result.get("extracted_data") or {}
+    normalized_summary = normalize_invoice_data(extracted, file_name=safe_name)
 
     # Notify orchestrator via system message if conversation_id provided
     if conversation_id:
-        msg = build_invoice_system_message("uploaded", extracted, safe_name)
+        msg = build_invoice_system_message("uploaded", normalized_summary, safe_name)
         inject_system_message(conversation_id, str(current_user.id), msg)
 
     return {
@@ -405,12 +412,14 @@ async def upload_invoice(
         "message": result.get("message", "Invoice uploaded, extracted, and indexed successfully."),
         "timings": result.get("timings", {}),
         "invoice_summary": {
-            k: extracted.get(k)
-            for k in [
-                "vendor_name", "invoice_number", "total_amount",
-                "invoice_date", "due_date", "payment_status", "currency",
-            ]
-            if extracted.get(k) is not None
+            "invoice_number": normalized_summary.get("invoice_number"),
+            "vendor_name": normalized_summary.get("vendor_name"),
+            "total_amount": normalized_summary.get("total_amount"),
+            "invoice_date": normalized_summary.get("invoice_date"),
+            "due_date": normalized_summary.get("due_date"),
+            "payment_status": normalized_summary.get("payment_status"),
+            "currency": normalized_summary.get("currency"),
+            "line_items": normalized_summary.get("line_items", []),
         },
     }
 
@@ -422,18 +431,86 @@ async def upload_invoice(
 async def get_user_invoices(
     include_ids: bool = Query(False),
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Return all stored invoices for the current authenticated user.
-    Used by dashboard for metrics, tables, and charts.
+    Reads authoritative records from SQLite invoices table and unifies with ChromaDB vector store.
     """
     user_id = str(current_user.id)
     try:
-        raw = get_all_invoices_with_ids(user_id=user_id) if include_ids else get_all_invoices(user_id=user_id)
-        if not include_ids:
-            invoices = [{k: v for k, v in inv.items() if k != "_doc_id"} for inv in raw]
-        else:
-            invoices = raw
+        # 1. Fetch from SQLite invoices table
+        stmt = select(Invoice).where(Invoice.user_id == current_user.id).order_by(Invoice.id.desc())
+        sql_res = await db.execute(stmt)
+        sql_rows = sql_res.scalars().all()
+
+        # 2. Fetch from ChromaDB
+        chroma_raw = get_all_invoices_with_ids(user_id=user_id) if include_ids else get_all_invoices(user_id=user_id)
+
+        # Build index of ChromaDB records by file_name and invoice_number
+        chroma_by_file = {c.get("file_name"): c for c in chroma_raw if c.get("file_name")}
+        chroma_by_num = {c.get("invoice_number"): c for c in chroma_raw if c.get("invoice_number") and c.get("invoice_number") != "N/A"}
+
+        invoices = []
+        seen_files = set()
+        seen_nums = set()
+
+        for inv in sql_rows:
+            f_name = inv.file_name or ""
+            i_num = inv.invoice_number or ""
+            if f_name:
+                seen_files.add(f_name)
+            if i_num:
+                seen_nums.add(i_num)
+
+            # Match ChromaDB record
+            chroma_match = chroma_by_file.get(f_name) or chroma_by_num.get(i_num) or {}
+            doc_id = chroma_match.get("_doc_id") or f"inv_{i_num or inv.id}"
+
+            # Parse line items from JSON if present
+            items = []
+            if inv.items:
+                try:
+                    items = json.loads(inv.items)
+                except Exception:
+                    items = []
+
+            inv_dict = {
+                "id": inv.id,
+                "file_name": f_name,
+                "vendor_name": inv.vendor_name or "Unknown Vendor",
+                "vendor_address": inv.vendor_address or "",
+                "buyer_name": inv.buyer_name or "N/A",
+                "buyer_address": inv.buyer_address or "",
+                "invoice_number": i_num or "N/A",
+                "invoice_date": inv.invoice_date or "N/A",
+                "items": items,
+                "line_items": items,
+                "subtotal": float(inv.subtotal or inv.total_amount or 0.0),
+                "tax": float(inv.tax or 0.0),
+                "discount": float(inv.discount or 0.0),
+                "total_amount": float(inv.total_amount or 0.0),
+                "payment_status": chroma_match.get("payment_status", "Unpaid"),
+                "currency": chroma_match.get("currency", "USD"),
+                "created_at": str(inv.created_at) if inv.created_at else "",
+            }
+            if include_ids:
+                inv_dict["_doc_id"] = doc_id
+
+            invoices.append(inv_dict)
+
+        # Include any ChromaDB invoices not yet present in SQLite
+        for c in chroma_raw:
+            c_file = c.get("file_name")
+            c_num = c.get("invoice_number")
+            if (c_file and c_file in seen_files) or (c_num and c_num != "N/A" and c_num in seen_nums):
+                continue
+            norm = normalize_invoice_data(c, file_name=c_file or "")
+            entry = {**c, **norm}
+            if not include_ids and "_doc_id" in entry:
+                del entry["_doc_id"]
+            invoices.append(entry)
+
         return {
             "status": "success",
             "count": len(invoices),
@@ -452,9 +529,11 @@ async def delete_user_invoice(
     doc_id: str,
     conversation_id: Optional[str] = Query(None),
     current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """
     Delete an invoice owned by current_user.id.
+    Removes from both ChromaDB and SQLite invoices table.
     """
     user_id = str(current_user.id)
     if not doc_id or not doc_id.strip():
@@ -468,6 +547,25 @@ async def delete_user_invoice(
         pass
 
     success = delete_invoice(doc_id=doc_id, user_id=user_id)
+
+    # Also clean up from SQLite invoices table
+    try:
+        clean_doc = doc_id.replace("inv_", "")
+        stmt = select(Invoice).where(
+            (Invoice.user_id == current_user.id) &
+            ((Invoice.file_name == doc_id) |
+             (Invoice.invoice_number == doc_id) |
+             (Invoice.invoice_number == clean_doc))
+        )
+        sql_res = await db.execute(stmt)
+        sql_inv = sql_res.scalar_one_or_none()
+        if sql_inv:
+            await db.delete(sql_inv)
+            await db.commit()
+            success = True
+    except Exception as exc:
+        logger.warning("SQLite cleanup error on delete: %s", exc)
+
     if not success:
         raise HTTPException(status_code=404, detail="Invoice not found.")
 

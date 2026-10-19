@@ -1573,6 +1573,7 @@ body::before {
 }
 
 .auth-input {
+  box-sizing: border-box;
   width: 100%;
   padding: 0.75rem 0.85rem;
   background: #FAF7EE;
@@ -1591,6 +1592,7 @@ body::before {
 }
 
 .password-input-wrapper {
+  box-sizing: border-box;
   position: relative;
   display: flex;
   align-items: center;
@@ -1598,12 +1600,15 @@ body::before {
 }
 
 .password-input-wrapper .auth-input {
+  box-sizing: border-box;
+  width: 100%;
   padding-right: 2.75rem;
 }
 
 .password-toggle-btn {
+  box-sizing: border-box;
   position: absolute;
-  right: 0.5rem;
+  right: 0.75rem;
   top: 50%;
   transform: translateY(-50%);
   background: transparent;
