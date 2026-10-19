@@ -6,6 +6,29 @@ let trendChartInstance = null;
 let donutChartInstance = null;
 let vendorChartInstance = null;
 
+const CURRENCY_SYMBOLS = {
+  INR: "₹", "₹": "₹", RUPEE: "₹", RS: "₹",
+  USD: "$", "$": "$", DOLLAR: "$",
+  EUR: "€", "€": "€", EURO: "€",
+  GBP: "£", "£": "£", POUND: "£",
+};
+
+function currencySymbol(currency) {
+  const key = (currency || "").toString().trim().toUpperCase();
+  return CURRENCY_SYMBOLS[key] || "₹";
+}
+
+function dominantCurrency(invoices) {
+  const counts = {};
+  (invoices || []).forEach((inv) => {
+    const key = (inv.currency || "").toString().trim().toUpperCase();
+    if (key) counts[key] = (counts[key] || 0) + 1;
+  });
+  let best = "", bestCount = 0;
+  Object.entries(counts).forEach(([k, v]) => { if (v > bestCount) { best = k; bestCount = v; } });
+  return best || "INR";
+}
+
 function cleanVendorName(raw) {
   if (!raw) return "Unknown Vendor";
   if (typeof raw === "object") {
@@ -100,6 +123,7 @@ export const charts = {
     const canvas = document.getElementById("chart-spend-trend");
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
+    const sym = currencySymbol(dominantCurrency(invoices));
 
     const dateMap = {};
     invoices.forEach((inv) => {
@@ -139,7 +163,7 @@ export const charts = {
         labels,
         datasets: [
           {
-            label: "Disbursement (₹)",
+            label: `Disbursement (${sym})`,
             data: values,
             borderColor: "#1C1710", // Pure Ink line
             borderWidth: 2,
@@ -179,7 +203,7 @@ export const charts = {
             ticks: {
               color: "#6E6455",
               font: { family: "'IBM Plex Mono', monospace", size: 10 },
-              callback: (val) => `₹${Number(val).toLocaleString("en-IN")}`,
+              callback: (val) => `${sym}${Number(val).toLocaleString("en-IN")}`,
             },
           },
         },
@@ -262,6 +286,7 @@ export const charts = {
    * 3. Top Vendors — Rendered as a ruled ledger table
    */
   renderTopVendors(invoices) {
+    const sym = currencySymbol(dominantCurrency(invoices));
     const vendorMap = {};
     invoices.forEach((inv) => {
       const vendor = cleanVendorName(inv.vendor_name || inv.seller);
@@ -286,7 +311,7 @@ export const charts = {
             <tr>
               <td style="font-family:var(--font-mono); font-size:0.75rem; color:var(--ink-muted);">${idx + 1}.</td>
               <td><strong>${escapeHtml(vendor)}</strong></td>
-              <td class="mono-amount" style="text-align:right;">₹${amt.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</td>
+              <td class="mono-amount" style="text-align:right;">${sym}${amt.toLocaleString("en-IN", { minimumFractionDigits: 2 })}</td>
             </tr>
           `)
           .join("");
@@ -311,7 +336,7 @@ export const charts = {
         labels: labels.length ? labels : ["No data"],
         datasets: [
           {
-            label: "Spend (₹)",
+            label: `Spend (${sym})`,
             data: data.length ? data : [0],
             backgroundColor: "#1C1710",
             borderColor: "#1C1710",
@@ -333,7 +358,7 @@ export const charts = {
             ticks: {
               color: "#6E6455",
               font: { family: "'IBM Plex Mono', monospace", size: 9 },
-              callback: (val) => `₹${Number(val).toLocaleString("en-IN")}`,
+              callback: (val) => `${sym}${Number(val).toLocaleString("en-IN")}`,
             },
           },
           y: {

@@ -525,7 +525,7 @@ async def get_user_invoices(
         }
     except Exception as exc:
         logger.error("Get invoices error for user %s: %s", user_id, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -636,7 +636,7 @@ async def chat_history(
         }
     except Exception as exc:
         logger.error("Chat history error conv=%s: %s", conversation_id, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -658,7 +658,7 @@ async def list_user_conversations(
         }
     except Exception as exc:
         logger.error("List conversations error user=%s: %s", user_id, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -675,7 +675,7 @@ async def get_user_dashboard_charts(
         return {"status": "success", "charts": charts, "count": len(charts)}
     except Exception as exc:
         logger.error("Failed to list dashboard charts for user %s: %s", user_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -731,7 +731,7 @@ async def create_user_dashboard_chart(
         return {"status": "success", "chart": saved}
     except Exception as exc:
         logger.error("Error creating dashboard chart user=%s: %s", user_id, exc, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Chart generation failed: {exc}")
+        raise HTTPException(status_code=500, detail="Chart generation failed. Please try again.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -753,7 +753,7 @@ async def delete_user_dashboard_chart(
         raise
     except Exception as exc:
         logger.error("Error deleting dashboard chart %s: %s", chart_id, exc)
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="An internal error occurred. Please try again.")
 
 
 if __name__ == "__main__":
