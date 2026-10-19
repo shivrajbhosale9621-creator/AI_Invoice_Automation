@@ -565,8 +565,8 @@ function updateDashboardMetrics(invoices) {
   const elPaidRatio = document.getElementById("stat-paid-ratio");
   const elVendorsCount = document.getElementById("stat-vendors-count");
 
-  if (elTotalSpend) elTotalSpend.textContent = formatRupee(totalSpend);
-  if (elAvgSpend) elAvgSpend.textContent = formatRupee(avgSpend);
+  if (elTotalSpend) elTotalSpend.textContent = formatMoney(totalSpend, dominantCurrency(invoices));
+  if (elAvgSpend) elAvgSpend.textContent = formatMoney(avgSpend, dominantCurrency(invoices));
   if (elTotalCount) elTotalCount.textContent = totalCount.toString();
   if (elPaidRatio) elPaidRatio.textContent = `${paidRatio}%`;
   if (elVendorsCount) elVendorsCount.textContent = vendors.size.toString();
@@ -606,7 +606,7 @@ function renderRecentInvoices(invoices) {
             ${escapeHtml(date)}
           </div>
           <div class="recent-inv-right">
-            <span class="recent-inv-amount">${formatRupee(amt)}</span>
+            <span class="recent-inv-amount">${formatMoney(amt, inv.currency)}</span>
             <span class="stamp-badge ${statusClass}">${statusLabel}</span>
           </div>
         </div>
@@ -676,7 +676,7 @@ function renderLedgerTable(invoices) {
           <td style="color:var(--ink-muted);">${escapeHtml(buyer)}</td>
           <td style="font-family:var(--font-mono); font-size:0.75rem;">${escapeHtml(date)}</td>
           <td style="font-family:var(--font-mono); font-weight:700; text-align:right;">
-            ${formatRupee(amt)}
+            ${formatMoney(amt, inv.currency)}
           </td>
           <td><span class="stamp-badge ${statusClass}">${statusLabel}</span></td>
           <td style="text-align:center;">
@@ -1041,7 +1041,37 @@ export function cleanVendorName(raw) {
   return str;
 }
 
-export function formatRupee(amount) {
+const CURRENCY_SYMBOLS = {
+  INR: "₹", "₹": "₹", RUPEE: "₹", RS: "₹",
+  USD: "$", "$": "$", DOLLAR: "$",
+  EUR: "€", "€": "€", EURO: "€",
+  GBP: "£", "£": "£", POUND: "£",
+};
+
+export function currencySymbol(currency) {
+  const key = (currency || "").toString().trim().toUpperCase();
+  return CURRENCY_SYMBOLS[key] || "₹";
+}
+
+export function formatMoney(amount, currency) {
   const num = parseFloat(amount) || 0;
-  return `₹${num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const sym = currencySymbol(currency);
+  return `${sym}${num.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+// Most common currency across a set of invoices; used for aggregate displays.
+export function dominantCurrency(invoices) {
+  const counts = {};
+  (invoices || []).forEach((inv) => {
+    const key = (inv.currency || "").toString().trim().toUpperCase();
+    if (key) counts[key] = (counts[key] || 0) + 1;
+  });
+  let best = "", bestCount = 0;
+  Object.entries(counts).forEach(([k, v]) => { if (v > bestCount) { best = k; bestCount = v; } });
+  return best || "INR";
+}
+
+// Legacy alias
+export function formatRupee(amount) {
+  return formatMoney(amount, "INR");
 }
