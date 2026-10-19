@@ -1,0 +1,38 @@
+# .gcloudignore for Google Cloud Run / App Engine deployments
+.git/
+.gitignore
+.dockerignore
+.agents/
+.gemini/
+.vscode/
+.idea/
+
+# Local databases and vector indexes
+invoices.db
+invoices.db-shm
+invoices.db-wal
+invoices.db-journal
+chroma_db/
+invoice_index/
+
+# Python virtual environment and bytecode
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Testing, reports, and caches
+tests/
+.pytest_cache/
+.benchmarks/
+htmlcov/
+.coverage
+reports/
+inboxes/
+invoices_to_process/
+scratch/
+*.log
+*.tmp

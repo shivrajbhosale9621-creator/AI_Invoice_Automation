@@ -89,39 +89,23 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
       if (timerEl) timerEl.textContent = `ELAPSED: ${elapsedSec}s`;
     }, 100);
 
-    // Stage 1: Received
+    // Stage 1: Received immediately
     setStageStatus("stage-received", "completed", "+0.1s");
-    setProgress(20);
 
-    // Stage 2: OCR Recognition
+    // Stages 2 to 5: Honest indeterminate state with spinners until real server response
     setStageStatus("stage-ocr", "active");
-    setProgress(35);
-
-    // In-flight progressive visual tracker
-    const stageCheckpoints = [
-      setTimeout(() => {
-        setStageStatus("stage-ocr", "completed", "+2.5s");
-        setStageStatus("stage-extracted", "active");
-        setProgress(60);
-      }, 2500),
-      setTimeout(() => {
-        setStageStatus("stage-extracted", "completed", "+8.5s");
-        setStageStatus("stage-validated", "active");
-        setProgress(80);
-      }, 8500),
-      setTimeout(() => {
-        setStageStatus("stage-validated", "completed", "+11.0s");
-        setStageStatus("stage-filed", "active");
-        setProgress(92);
-      }, 11000),
-    ];
+    setStageStatus("stage-extracted", "active");
+    setStageStatus("stage-validated", "active");
+    setStageStatus("stage-filed", "active");
+    setIndeterminateProgress(true);
 
     try {
       showToast(`Filing "${file.name}" in ledger...`, "info");
       const res = await api.uploadInvoice(file, conversationId, userId);
 
-      stageCheckpoints.forEach(clearTimeout);
       clearInterval(timerInterval);
+      setIndeterminateProgress(false);
+      setProgress(100);
 
       const totalElapsed = ((Date.now() - startTime) / 1000).toFixed(2);
       const timerEl = document.getElementById("docket-timer");
@@ -133,13 +117,12 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
       const tStruct = Number(timings.structuring_s || 5.0);
       const tTotal = Number(timings.total_s || totalElapsed);
 
-      // Stamp true server timings
+      // Stamp true server timings upon actual completion
       setStageStatus("stage-received", "completed", `+${tPre.toFixed(1)}s`);
       setStageStatus("stage-ocr", "completed", `+${(tPre + tOcr).toFixed(1)}s`);
       setStageStatus("stage-extracted", "completed", `+${(tPre + tOcr + tStruct).toFixed(1)}s`);
       setStageStatus("stage-validated", "completed", `+${Math.min(tTotal, tPre + tOcr + tStruct + 0.1).toFixed(1)}s`);
       setStageStatus("stage-filed", "completed", `+${tTotal.toFixed(1)}s`);
-      setProgress(100);
 
       showToast(`Successfully filed invoice "${file.name}" in ${tTotal.toFixed(1)}s!`, "success");
 
@@ -153,8 +136,8 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
         onUploadSuccess();
       }
     } catch (err) {
+      setIndeterminateProgress(false);
       clearInterval(timerInterval);
-      stageCheckpoints.forEach(clearTimeout);
       showDocketError(err.message || "Invoice processing failed.");
       showToast(err.message || "Invoice processing failed.", "error");
     } finally {
@@ -163,6 +146,7 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
   }
 
   function resetDocketStages() {
+    setIndeterminateProgress(false);
     ["received", "ocr", "extracted", "validated", "filed"].forEach((stage) => {
       setStageStatus(`stage-${stage}`, "pending", "--:--");
     });
@@ -183,8 +167,8 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
         stampEl.className = "docket-stage-stamp stamp-badge paid";
         stampEl.textContent = "OK \u2713";
       } else if (status === "active") {
-        stampEl.className = "docket-stage-stamp stamp-badge pending";
-        stampEl.textContent = "IN PROGRESS";
+        stampEl.className = "docket-stage-stamp stamp-badge pending is-loading";
+        stampEl.innerHTML = `<span class="docket-inline-spinner"></span> IN PROGRESS`;
       } else if (status === "failed") {
         stampEl.className = "docket-stage-stamp stamp-badge failed";
         stampEl.textContent = "FAILED";
@@ -196,14 +180,30 @@ export function initUpload({ onUploadSuccess, getSessionContext, showToast }) {
       }
     }
 
-    if (timeEl && timeText) {
-      timeEl.textContent = timeText;
+    if (timeEl) {
+      if (timeText) {
+        timeEl.textContent = timeText;
+      } else if (status === "active") {
+        timeEl.textContent = "PROCESSING...";
+      } else {
+        timeEl.textContent = "--:--";
+      }
     }
   }
 
   function setProgress(pct) {
     const fill = document.getElementById("docket-progress-fill");
     if (fill) fill.style.width = `${pct}%`;
+  }
+
+  function setIndeterminateProgress(enable) {
+    const fill = document.getElementById("docket-progress-fill");
+    if (!fill) return;
+    if (enable) {
+      fill.classList.add("is-indeterminate");
+    } else {
+      fill.classList.remove("is-indeterminate");
+    }
   }
 
   function showDocketError(reason) {

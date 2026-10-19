@@ -4,6 +4,7 @@ FROM python:3.10-slim
 # Prevent Python from writing .pyc files and buffer stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PORT=5000
 
 # Install minimal OS dependencies for PyMuPDF, OpenCV headless, and ONNX Runtime OpenMP
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -24,12 +25,12 @@ COPY . .
 # Ensure runtime directories exist
 RUN mkdir -p inboxes reports chroma_db
 
-# Expose FastAPI application port
+# Expose default application port
 EXPOSE 5000
 
-# Healthcheck to ensure FastAPI service is live and responding
+# Healthcheck to ensure FastAPI service is live on active $PORT
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:5000/health || exit 1
+    CMD curl -f http://localhost:${PORT}/api/health || exit 1
 
-# Launch FastAPI app with Uvicorn
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]
+# Launch FastAPI app with Uvicorn respecting $PORT injected by Cloud Run
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT}

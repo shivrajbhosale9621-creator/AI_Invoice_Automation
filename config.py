@@ -17,9 +17,13 @@ CHAT_DB_PATH : str
 """
 
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
+
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 os.environ["ANONYMIZED_TELEMETRY"] = "False"
-from pathlib import Path
 import chromadb
 
 

@@ -63,55 +63,60 @@ def upgrade() -> None:
         batch_op.create_index(batch_op.f('ix_refresh_tokens_token_hash'), ['token_hash'], unique=False)
         batch_op.create_index(batch_op.f('ix_refresh_tokens_user_id'), ['user_id'], unique=False)
 
-    with op.batch_alter_table('invoices', schema=None) as batch_op:
-        batch_op.add_column(sa.Column('user_id', sa.Uuid(), nullable=False))
-        batch_op.alter_column('id',
-               existing_type=sa.INTEGER(),
-               nullable=False,
-               autoincrement=True)
-        batch_op.alter_column('file_name',
-               existing_type=sa.TEXT(),
-               type_=sa.String(length=255),
-               existing_nullable=True)
-        batch_op.alter_column('vendor_name',
-               existing_type=sa.TEXT(),
-               type_=sa.String(length=255),
-               existing_nullable=True)
-        batch_op.alter_column('buyer_name',
-               existing_type=sa.TEXT(),
-               type_=sa.String(length=255),
-               existing_nullable=True)
-        batch_op.alter_column('invoice_number',
-               existing_type=sa.TEXT(),
-               type_=sa.String(length=100),
-               existing_nullable=True)
-        batch_op.alter_column('invoice_date',
-               existing_type=sa.TEXT(),
-               type_=sa.String(length=50),
-               existing_nullable=True)
-        batch_op.alter_column('subtotal',
-               existing_type=sa.REAL(),
-               type_=sa.Float(),
-               existing_nullable=True)
-        batch_op.alter_column('tax',
-               existing_type=sa.REAL(),
-               type_=sa.Float(),
-               existing_nullable=True)
-        batch_op.alter_column('discount',
-               existing_type=sa.REAL(),
-               type_=sa.Float(),
-               existing_nullable=True)
-        batch_op.alter_column('total_amount',
-               existing_type=sa.REAL(),
-               type_=sa.Float(),
-               existing_nullable=True)
-        batch_op.alter_column('created_at',
-               existing_type=sa.TIMESTAMP(),
-               type_=sa.DateTime(timezone=True),
-               existing_nullable=True,
-               existing_server_default=sa.text('(CURRENT_TIMESTAMP)'))
-        batch_op.create_index(batch_op.f('ix_invoices_user_id'), ['user_id'], unique=False)
-        batch_op.create_foreign_key('fk_invoices_user_id', 'users', ['user_id'], ['id'], ondelete='CASCADE')
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = inspector.get_table_names()
+
+    if "invoices" in tables:
+        with op.batch_alter_table('invoices', schema=None) as batch_op:
+            batch_op.add_column(sa.Column('user_id', sa.Uuid(), nullable=False))
+            batch_op.alter_column('id',
+                   existing_type=sa.INTEGER(),
+                   nullable=False,
+                   autoincrement=True)
+            batch_op.alter_column('file_name',
+                   existing_type=sa.TEXT(),
+                   type_=sa.String(length=255),
+                   existing_nullable=True)
+            batch_op.alter_column('vendor_name',
+                   existing_type=sa.TEXT(),
+                   type_=sa.String(length=255),
+                   existing_nullable=True)
+            batch_op.alter_column('buyer_name',
+                   existing_type=sa.TEXT(),
+                   type_=sa.String(length=255),
+                   existing_nullable=True)
+            batch_op.alter_column('invoice_number',
+                   existing_type=sa.TEXT(),
+                   type_=sa.String(length=100),
+                   existing_nullable=True)
+            batch_op.alter_column('invoice_date',
+                   existing_type=sa.TEXT(),
+                   type_=sa.String(length=50),
+                   existing_nullable=True)
+            batch_op.alter_column('subtotal',
+                   existing_type=sa.REAL(),
+                   type_=sa.Float(),
+                   existing_nullable=True)
+            batch_op.alter_column('tax',
+                   existing_type=sa.REAL(),
+                   type_=sa.Float(),
+                   existing_nullable=True)
+            batch_op.alter_column('discount',
+                   existing_type=sa.REAL(),
+                   type_=sa.Float(),
+                   existing_nullable=True)
+            batch_op.alter_column('total_amount',
+                   existing_type=sa.REAL(),
+                   type_=sa.Float(),
+                   existing_nullable=True)
+            batch_op.alter_column('created_at',
+                   existing_type=sa.TIMESTAMP(),
+                   type_=sa.DateTime(timezone=True),
+                   existing_nullable=True,
+                   existing_server_default=sa.text('(CURRENT_TIMESTAMP)'))
+            batch_op.create_index(batch_op.f('ix_invoices_user_id'), ['user_id'], unique=False)
+            batch_op.create_foreign_key('fk_invoices_user_id', 'users', ['user_id'], ['id'], ondelete='CASCADE')
 
     # ### end Alembic commands ###
 
@@ -119,55 +124,60 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
-    with op.batch_alter_table('invoices', schema=None) as batch_op:
-        batch_op.drop_constraint('fk_invoices_user_id', type_='foreignkey')
-        batch_op.drop_index(batch_op.f('ix_invoices_user_id'))
-        batch_op.alter_column('created_at',
-               existing_type=sa.DateTime(timezone=True),
-               type_=sa.TIMESTAMP(),
-               existing_nullable=True,
-               existing_server_default=sa.text('(CURRENT_TIMESTAMP)'))
-        batch_op.alter_column('total_amount',
-               existing_type=sa.Float(),
-               type_=sa.REAL(),
-               existing_nullable=True)
-        batch_op.alter_column('discount',
-               existing_type=sa.Float(),
-               type_=sa.REAL(),
-               existing_nullable=True)
-        batch_op.alter_column('tax',
-               existing_type=sa.Float(),
-               type_=sa.REAL(),
-               existing_nullable=True)
-        batch_op.alter_column('subtotal',
-               existing_type=sa.Float(),
-               type_=sa.REAL(),
-               existing_nullable=True)
-        batch_op.alter_column('invoice_date',
-               existing_type=sa.String(length=50),
-               type_=sa.TEXT(),
-               existing_nullable=True)
-        batch_op.alter_column('invoice_number',
-               existing_type=sa.String(length=100),
-               type_=sa.TEXT(),
-               existing_nullable=True)
-        batch_op.alter_column('buyer_name',
-               existing_type=sa.String(length=255),
-               type_=sa.TEXT(),
-               existing_nullable=True)
-        batch_op.alter_column('vendor_name',
-               existing_type=sa.String(length=255),
-               type_=sa.TEXT(),
-               existing_nullable=True)
-        batch_op.alter_column('file_name',
-               existing_type=sa.String(length=255),
-               type_=sa.TEXT(),
-               existing_nullable=True)
-        batch_op.alter_column('id',
-               existing_type=sa.INTEGER(),
-               nullable=True,
-               autoincrement=True)
-        batch_op.drop_column('user_id')
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    tables = inspector.get_table_names()
+
+    if "invoices" in tables:
+        with op.batch_alter_table('invoices', schema=None) as batch_op:
+            batch_op.drop_constraint('fk_invoices_user_id', type_='foreignkey')
+            batch_op.drop_index(batch_op.f('ix_invoices_user_id'))
+            batch_op.alter_column('created_at',
+                   existing_type=sa.DateTime(timezone=True),
+                   type_=sa.TIMESTAMP(),
+                   existing_nullable=True,
+                   existing_server_default=sa.text('(CURRENT_TIMESTAMP)'))
+            batch_op.alter_column('total_amount',
+                   existing_type=sa.Float(),
+                   type_=sa.REAL(),
+                   existing_nullable=True)
+            batch_op.alter_column('discount',
+                   existing_type=sa.Float(),
+                   type_=sa.REAL(),
+                   existing_nullable=True)
+            batch_op.alter_column('tax',
+                   existing_type=sa.Float(),
+                   type_=sa.REAL(),
+                   existing_nullable=True)
+            batch_op.alter_column('subtotal',
+                   existing_type=sa.Float(),
+                   type_=sa.REAL(),
+                   existing_nullable=True)
+            batch_op.alter_column('invoice_date',
+                   existing_type=sa.String(length=50),
+                   type_=sa.TEXT(),
+                   existing_nullable=True)
+            batch_op.alter_column('invoice_number',
+                   existing_type=sa.String(length=100),
+                   type_=sa.TEXT(),
+                   existing_nullable=True)
+            batch_op.alter_column('buyer_name',
+                   existing_type=sa.String(length=255),
+                   type_=sa.TEXT(),
+                   existing_nullable=True)
+            batch_op.alter_column('vendor_name',
+                   existing_type=sa.String(length=255),
+                   type_=sa.TEXT(),
+                   existing_nullable=True)
+            batch_op.alter_column('file_name',
+                   existing_type=sa.String(length=255),
+                   type_=sa.TEXT(),
+                   existing_nullable=True)
+            batch_op.alter_column('id',
+                   existing_type=sa.INTEGER(),
+                   nullable=True,
+                   autoincrement=True)
+            batch_op.drop_column('user_id')
 
     with op.batch_alter_table('refresh_tokens', schema=None) as batch_op:
         batch_op.drop_index(batch_op.f('ix_refresh_tokens_user_id'))

@@ -1,9 +1,11 @@
 import os
 import uuid
 import datetime
+import time
 import logging
 import threading
 import asyncio
+from contextlib import asynccontextmanager
 from typing import Optional, List, Dict, Any
 
 from fastapi import FastAPI, Request, Response, Depends, HTTPException, status, UploadFile, File, Form, Query
@@ -140,12 +142,31 @@ def build_invoice_system_message(action: str, invoice_data: dict, file_name: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FastAPI Lifespan Handler (Startup Warmup & Graceful Teardown)
+# ─────────────────────────────────────────────────────────────────────────────
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup warmup: Pre-load RapidOCR ONNX model in thread pool so cold-start overhead is zero
+    t0 = time.time()
+    logger.info("Starting RapidOCR ONNX model warmup...")
+    try:
+        from ocr_engine import get_ocr_instance
+        await asyncio.to_thread(get_ocr_instance)
+        warmup_dur = round(time.time() - t0, 2)
+        logger.info("RapidOCR model warmup completed in %ss", warmup_dur)
+    except Exception as exc:
+        logger.warning("RapidOCR model warmup encountered error (non-fatal): %s", exc)
+    yield
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FastAPI Application Setup
 # ─────────────────────────────────────────────────────────────────────────────
 app = FastAPI(
     title="AutoInvoice Intelligence Ledger",
     description="FastAPI service for AI Invoice Automation with Brevo-powered Email OTP Authentication.",
     version="2.0.0",
+    lifespan=lifespan,
 )
 
 # Attach slowapi rate limiter
@@ -195,9 +216,10 @@ async def root_index():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Endpoint 1 — GET /api/health
+# Endpoint 1 — GET /api/health and GET /health
 # ─────────────────────────────────────────────────────────────────────────────
 @app.get("/api/health")
+@app.get("/health")
 async def health():
     """Liveness probe."""
     return {

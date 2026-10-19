@@ -40,6 +40,7 @@ static/charts/*.html
 .gemini/
 .vscode/
 .idea/
+scratch/
 
 # Jupyter Notebooks & checkpoints
 *.ipynb

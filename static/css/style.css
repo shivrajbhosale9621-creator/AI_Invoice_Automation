@@ -1124,6 +1124,33 @@ body::before {
   transition: width 0.3s ease;
 }
 
+.ink-progress-bar-fill.is-indeterminate {
+  width: 35% !important;
+  animation: inkIndeterminate 1.8s ease-in-out infinite;
+}
+
+@keyframes inkIndeterminate {
+  0% { transform: translateX(-100%); }
+  50% { transform: translateX(180%); }
+  100% { transform: translateX(350%); }
+}
+
+.docket-inline-spinner {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: docketSpin 0.75s linear infinite;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+@keyframes docketSpin {
+  to { transform: rotate(360deg); }
+}
+
 /* Checklist Stage Rows */
 .docket-stage-list {
   list-style: none;

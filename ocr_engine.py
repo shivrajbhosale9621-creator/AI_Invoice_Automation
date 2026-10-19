@@ -25,40 +25,51 @@ from config import GROQ_API_KEY, GROQ_MODEL_NAME, DEFAULT_INDEX_PATH
 from vector_store import save_invoice_to_vector_store, load_index
 
 
+import threading
+
 # -------------------------------------------------------------
 # 1. Helper: Resolve & Cache ONNX Model Paths and RapidOCR Singleton
 # -------------------------------------------------------------
 _OCR_PATHS_CACHE = None
 _RAPID_OCR_INSTANCE = None
+_OCR_INIT_LOCK = threading.RLock()
 
 
 def get_ocr_model_paths():
 	"""
 	Downloads or resolves local cached paths for PaddleOCR ONNX models.
-	Caches resolved paths in-memory to prevent repeated HuggingFace Hub network checks.
+	Thread-safe cache prevents repeated HuggingFace Hub network checks.
 	"""
 	global _OCR_PATHS_CACHE
 	if _OCR_PATHS_CACHE is None:
-		det_path = hf_hub_download("monkt/paddleocr-onnx", "detection/v5/det.onnx")
-		rec_path = hf_hub_download("monkt/paddleocr-onnx", "languages/english/rec.onnx")
-		dict_path = hf_hub_download("monkt/paddleocr-onnx", "languages/english/dict.txt")
-		_OCR_PATHS_CACHE = (det_path, rec_path, dict_path)
+		with _OCR_INIT_LOCK:
+				try:
+					det_path = hf_hub_download("monkt/paddleocr-onnx", "detection/v5/det.onnx", local_files_only=True)
+					rec_path = hf_hub_download("monkt/paddleocr-onnx", "languages/english/rec.onnx", local_files_only=True)
+					dict_path = hf_hub_download("monkt/paddleocr-onnx", "languages/english/dict.txt", local_files_only=True)
+				except Exception:
+					det_path = hf_hub_download("monkt/paddleocr-onnx", "detection/v5/det.onnx")
+					rec_path = hf_hub_download("monkt/paddleocr-onnx", "languages/english/rec.onnx")
+					dict_path = hf_hub_download("monkt/paddleocr-onnx", "languages/english/dict.txt")
+				_OCR_PATHS_CACHE = (det_path, rec_path, dict_path)
 	return _OCR_PATHS_CACHE
 
 
 def get_ocr_instance() -> RapidOCR:
 	"""
-	Thread-safe singleton for RapidOCR ONNX inference engine.
-	Avoids reloading 50+ MB ONNX session graphs on every request, slashing ~12s per invoice.
+	Thread-safe singleton for RapidOCR ONNX inference engine protected by threading.Lock.
+	Double-checked locking guarantees exact single initialization under concurrent requests.
 	"""
 	global _RAPID_OCR_INSTANCE
 	if _RAPID_OCR_INSTANCE is None:
-		det_path, rec_path, dict_path = get_ocr_model_paths()
-		_RAPID_OCR_INSTANCE = RapidOCR(
-			det_model_path=det_path,
-			rec_model_path=rec_path,
-			rec_keys_path=dict_path,
-		)
+		with _OCR_INIT_LOCK:
+			if _RAPID_OCR_INSTANCE is None:
+				det_path, rec_path, dict_path = get_ocr_model_paths()
+				_RAPID_OCR_INSTANCE = RapidOCR(
+					det_model_path=det_path,
+					rec_model_path=rec_path,
+					rec_keys_path=dict_path,
+				)
 	return _RAPID_OCR_INSTANCE
 
 
