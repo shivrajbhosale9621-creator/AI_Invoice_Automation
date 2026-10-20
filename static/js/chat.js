@@ -269,9 +269,9 @@ export function initChat({ getSessionContext, setConversationId, showToast }) {
           appendUserMessage(m.content);
         } else if (m.role === "assistant") {
           appendAssistantMessage(m.content);
-        } else if (m.role === "system") {
-          appendSystemMessage(m.content);
         }
+        // system messages are internal AI context (upload notices etc.)
+        // and are never rendered in the user-facing thread
       });
     } catch (err) {
       removeMessage(loadingId);

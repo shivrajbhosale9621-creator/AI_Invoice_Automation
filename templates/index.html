@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light">
   <title>AutoInvoice — Invoice Intelligence Ledger</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
   <meta name="description" content="Tactile, editorial financial ledger with rubber-stamped paper invoice aesthetics, RapidOCR, and conversational AI.">
@@ -20,7 +21,7 @@
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
-  <div id="app-root">
+  <div id="app-root" style="display:none;" inert aria-hidden="true">
 
     <!-- ─────────────────────────────────────────────────────────────────── -->
     <!-- Sidebar: Ledger Index Spine -->
@@ -158,7 +159,7 @@
               <div class="hero-spend-value" id="stat-total-spend">₹0.00</div>
               <div class="hero-spend-meta">
                 <span class="kpi-subtext">AVERAGE VOUCHER: <strong id="stat-avg-spend" style="color:var(--ink);">₹0.00</strong></span>
-                <span class="kpi-subtext">CURRENCY: <strong>INR (₹)</strong></span>
+                <span class="kpi-subtext">CURRENCY: <strong id="kpi-currency-label">INR (₹)</strong></span>
               </div>
             </div>
 
@@ -389,7 +390,7 @@
                       <th>INVOICE #</th>
                       <th>VENDOR ENTITY</th>
                       <th>DATE</th>
-                      <th class="th-amount">AMOUNT (USD)</th>
+                      <th class="th-amount amount-col-header">AMOUNT</th>
                       <th style="text-align:right;">STATUS</th>
                     </tr>
                   </thead>
@@ -653,7 +654,7 @@
                     <th>VENDOR ENTITY</th>
                     <th>BUYER / CUSTOMER</th>
                     <th>DATE</th>
-                    <th class="th-amount">AMOUNT (USD)</th>
+                    <th class="th-amount amount-col-header">AMOUNT</th>
                     <th style="text-align:center;">SETTLEMENT</th>
                     <th style="text-align:right;">ACTION</th>
                   </tr>
@@ -679,7 +680,7 @@
     <div class="modal-box">
       <h3>EXPUNGE RECORD FROM LEDGER</h3>
       <p style="font-family:var(--font-sans); font-size:0.88rem; color:var(--ink-muted); line-height:1.6; margin:0.75rem 0 1.25rem 0;">
-        Confirm deletion of invoice <strong id="delete-modal-inv-num" style="color:var(--ink); font-family:var(--font-mono);">record</strong> from ChromaDB vector storage and index records. This action cannot be revoked.
+        Confirm deletion of invoice <strong id="delete-modal-inv-num" style="color:var(--ink); font-family:var(--font-mono);">record</strong> from your ledger. This action cannot be revoked.
       </p>
       <div class="modal-actions">
         <button class="btn-secondary" id="btn-modal-cancel">CANCEL</button>
@@ -726,7 +727,7 @@
           <div class="auth-form-group">
             <label for="login-password">Ledger Passphrase</label>
             <div class="password-input-wrapper">
-              <input type="password" id="login-password" class="auth-input" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" required autocomplete="current-password">
+              <input type="password" id="login-password" class="auth-input" placeholder="Enter your passphrase" required autocomplete="current-password">
               <button type="button" class="password-toggle-btn" aria-label="Show passphrase" title="Show passphrase">
                 <svg class="eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
@@ -771,7 +772,7 @@
           <div class="auth-form-group">
             <label for="signup-password">Create Passphrase (Min. 8 Characters)</label>
             <div class="password-input-wrapper">
-              <input type="password" id="signup-password" class="auth-input" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" minlength="8" required autocomplete="new-password">
+              <input type="password" id="signup-password" class="auth-input" placeholder="Enter your passphrase" minlength="8" required autocomplete="new-password">
               <button type="button" class="password-toggle-btn" aria-label="Show passphrase" title="Show passphrase">
                 <svg class="eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
@@ -891,7 +892,7 @@
           <div class="auth-form-group">
             <label for="reset-new-password">New Passphrase (Min. 8 Characters)</label>
             <div class="password-input-wrapper">
-              <input type="password" id="reset-new-password" class="auth-input" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" minlength="8" required>
+              <input type="password" id="reset-new-password" class="auth-input" placeholder="Enter your passphrase" minlength="8" required>
               <button type="button" class="password-toggle-btn" aria-label="Show passphrase" title="Show passphrase">
                 <svg class="eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>

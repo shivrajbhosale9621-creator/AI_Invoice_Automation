@@ -412,6 +412,44 @@ def generate_custom_graph(query: str):
 
 	return None
 
+PAPER_PALETTE = ["#1C1710", "#A86A12", "#2E7D4F", "#B5342A", "#6E6455", "#8C7B5E", "#4A6B8A", "#7A3E2E"]
+
+
+def _figure_has_data(fig) -> bool:
+	"""A chart with a title but no traces (or only empty traces) is worse
+	than no chart: it renders as an empty box like the old Payment Status pie."""
+	try:
+		for trace in getattr(fig, "data", []) or []:
+			x = getattr(trace, "x", None)
+			y = getattr(trace, "y", None)
+			labels = getattr(trace, "labels", None)
+			values = getattr(trace, "values", None)
+			if labels is not None and values is not None and len(labels) and len(values):
+				return True
+			if x is not None and y is not None and len(x) and len(y):
+				return True
+		return False
+	except Exception:
+		return True  # never drop a figure we cannot inspect
+
+
+def _apply_paper_theme(fig) -> None:
+	"""Restyle a Plotly figure to the paper-invoice theme (no default blues)."""
+	fig.update_layout(
+		paper_bgcolor="#FDFBF5",
+		plot_bgcolor="#FDFBF5",
+		font=dict(family="Inter, sans-serif", color="#1C1710"),
+		margin=dict(l=40, r=40, t=50, b=40),
+	)
+	for idx, trace in enumerate(getattr(fig, "data", []) or []):
+		if getattr(trace, "type", "") == "bar":
+			trace.marker = dict(color=PAPER_PALETTE[idx % len(PAPER_PALETTE)])
+		elif getattr(trace, "type", "") == "pie":
+			trace.marker = dict(colors=PAPER_PALETTE)
+		elif getattr(trace, "type", "") == "scatter" and getattr(trace, "mode", "") != "markers+text":
+			trace.line = dict(color=PAPER_PALETTE[0])
+
+
 class GraphAgent:
 	"""
 	Visual & Knowledge Graph Sub-Agent for Orchestrator.
@@ -421,6 +459,7 @@ class GraphAgent:
 	def __init__(self, llm=None, index_path=DEFAULT_INDEX_PATH):
 		self.llm = llm or ChatGroq(model=GROQ_MODEL_NAME, api_key=GROQ_API_KEY, temperature=0)
 		self.index_path = index_path
+		self.user_id = None  # set by orchestrator; scopes all data reads
 		self.tools = [
 			build_knowledge_graph,
 			generate_dashboard,
@@ -440,6 +479,12 @@ class GraphAgent:
 			"error": str | None
 		}
 		"""
+		# Scope all invoice-data reads in this run to the owning user
+		try:
+			from vector_store import set_current_user_id as _set_uid
+			_set_uid(self.user_id)
+		except Exception:
+			pass
 		if not os.path.exists(self.index_path) or not os.listdir(self.index_path):
 			return {
 				"status": "failed",
@@ -506,7 +551,17 @@ class GraphAgent:
 
 			# Normalize figures: always return a list of figures
 			raw_figures = result if isinstance(result, list) else [result]
-			figures = [f for f in raw_figures if f is not None]
+			figures = [f for f in raw_figures if f is not None and _figure_has_data(f)]
+
+			if not figures:
+				return {
+					"status": "failed",
+					"chart_type": tool_name,
+					"figures": [],
+					"chart_paths": [],
+					"message": "The chart came back empty, so nothing was pinned. Try rephrasing the request.",
+					"error": "All generated figures had no data"
+				}
 
 			chart_paths = []
 			static_charts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "charts")
@@ -516,12 +571,7 @@ class GraphAgent:
 			import datetime as _dt
 			for idx, fig in enumerate(figures):
 				try:
-					fig.update_layout(
-						paper_bgcolor="#FDFBF5",
-						plot_bgcolor="#FDFBF5",
-						font=dict(family="Inter, sans-serif", color="#1C1710"),
-						margin=dict(l=40, r=40, t=50, b=40),
-					)
+					_apply_paper_theme(fig)
 					chart_id = f"chart_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(_uuid.uuid4())[:8]}_{idx}.html"
 					chart_file_path = os.path.join(static_charts_dir, chart_id)
 					fig.write_html(chart_file_path, include_plotlyjs="cdn", full_html=True, config={"responsive": True})

@@ -43,9 +43,9 @@ export function showToast(message, type = "info") {
   const toast = document.createElement("div");
   toast.className = `toast ${type}`;
 
-  let stampLabel = "[INFO]";
-  if (type === "success") stampLabel = "[FILED]";
-  if (type === "error") stampLabel = "[ALERT]";
+  let stampLabel = "NOTICE";
+  if (type === "success") stampLabel = "DONE";
+  if (type === "error") stampLabel = "ALERT";
 
   toast.innerHTML = `
     <span class="stamp-badge ${type === "error" ? "failed" : (type === "success" ? "paid" : "pending")}" style="font-size:0.6rem; padding:0.1rem 0.35rem;">
@@ -108,6 +108,13 @@ export function setAuthState(user) {
     if (userEmailDisplay) userEmailDisplay.textContent = user.email || "";
     if (userBadgeContainer) userBadgeContainer.style.display = "flex";
     if (authOverlay) authOverlay.classList.add("hidden");
+    // Reveal the app shell only for authenticated users
+    const appRoot = document.getElementById("app-root");
+    if (appRoot) {
+      appRoot.style.display = "";
+      appRoot.removeAttribute("inert");
+      appRoot.removeAttribute("aria-hidden");
+    }
   } else {
     state.userId = "default_user";
     localStorage.removeItem("invoice_app_user_id");
@@ -115,6 +122,13 @@ export function setAuthState(user) {
     if (userBadgeContainer) userBadgeContainer.style.display = "none";
     if (authOverlay) authOverlay.classList.remove("hidden");
     showAuthScreen("login");
+    // Keep the whole dashboard out of unauthenticated users' DOM view
+    const appRoot = document.getElementById("app-root");
+    if (appRoot) {
+      appRoot.style.display = "none";
+      appRoot.setAttribute("inert", "");
+      appRoot.setAttribute("aria-hidden", "true");
+    }
   }
 }
 
@@ -139,6 +153,13 @@ function showAuthScreen(screenName) {
   screens.forEach((s) => {
     const el = document.getElementById(`auth-screen-${s}`);
     if (el) el.style.display = s === screenName ? "block" : "none";
+  });
+
+  // Clear passphrase fields on every switch so a secret typed on one
+  // auth screen never sits in another screen's field
+  ["login-password", "signup-password", "reset-new-password"].forEach((id) => {
+    const input = document.getElementById(id);
+    if (input) input.value = "";
   });
 
   // Clear notices
@@ -570,6 +591,14 @@ function updateDashboardMetrics(invoices) {
   if (elTotalCount) elTotalCount.textContent = totalCount.toString();
   if (elPaidRatio) elPaidRatio.textContent = `${paidRatio}%`;
   if (elVendorsCount) elVendorsCount.textContent = vendors.size.toString();
+
+  // Keep currency labels in sync with the data's dominant currency
+  const domCur = dominantCurrency(invoices) || "INR";
+  const curLabel = document.getElementById("kpi-currency-label");
+  if (curLabel) curLabel.textContent = `${domCur} (${currencySymbol(domCur)})`;
+  document.querySelectorAll(".amount-col-header").forEach((th) => {
+    th.textContent = `AMOUNT (${domCur})`;
+  });
 }
 
 function renderRecentInvoices(invoices) {

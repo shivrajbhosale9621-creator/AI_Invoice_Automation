@@ -274,11 +274,12 @@ class MainOrchestrator:
             max_tokens=1000,
         )
 
-        # Build specialist agents
-        self._qa_agent = _QAAgent()
+        # Build specialist agents (scoped to this orchestrator's user)
+        self._qa_agent = _QAAgent(user_id=self.user_id)
         self._ocr_agent = _OCRAgent()
         self._graph_agent = _GraphAgent(llm=self._llm)
-        self._report_agent = _ReportAgent()
+        self._graph_agent.user_id = self.user_id
+        self._report_agent = _ReportAgent(user_id=self.user_id)
 
         # Build tools
         self._tools = self._create_tools()
@@ -314,7 +315,7 @@ class MainOrchestrator:
             Always returns the full extracted invoice data so you can use it for further reasoning.
             """
             if store:
-                result = ocr.process_and_index_invoice(file)
+                result = ocr.process_and_index_invoice(file, user_id=self.user_id)
             else:
                 result = ocr.extract_only(file)
 
@@ -389,6 +390,10 @@ class MainOrchestrator:
             Caller-supplied deduplication token for the user message.
             If the same key is sent again (retry), the message is not saved twice.
         """
+        # Scope every invoice-data read in this request to the owner
+        from vector_store import set_current_user_id as _set_uid
+        _set_uid(self.user_id)
+
         # 1. Save user message (with deduplication)
         save_message(
             conversation_id=self.conversation_id,

@@ -706,6 +706,7 @@ async def create_user_dashboard_chart(
 
     try:
         agent = GraphAgent()
+        agent.user_id = user_id
         result = await asyncio.to_thread(agent.run, prompt)
         status_val = result.get("status")
         chart_paths = result.get("chart_paths") or []
