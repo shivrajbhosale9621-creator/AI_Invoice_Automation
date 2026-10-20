@@ -1,0 +1,645 @@
+From b49b92a4bf98cd5a7ffd8c4243445da1205ac698 Mon Sep 17 00:00:00 2001
+From: Code Review <review@local>
+Date: Tue, 20 Oct 2026 05:35:23 +0000
+Subject: [PATCH] fix: per-user chat data isolation + live-test UI fixes
+
+- Fix critical cross-user data leak: thread user_id through QAAgent,
+  GraphAgent, ReportAgent; scope get_all_invoices_matrix, semantic
+  search, and report state via explicit arg or request context var;
+  strict in-memory user filtering in get_all_invoices
+- Hide internal system messages from the chat UI
+- Fix password inputs rendering dark: color-scheme light, autofill
+  paper theme, text placeholders, clear on auth view switch
+- Toast stamps: plain DONE/NOTICE/ALERT instead of [FILED] etc.
+- Currency-aware AMOUNT column headers and KPI currency label
+- Charts: drop empty figures, paper-ink palette instead of Plotly blues
+- Gate app shell behind login; remove ChromaDB jargon from delete dialog
+---
+ app/main.py          |  1 +
+ graph_agent.py       | 64 +++++++++++++++++++++++++++++++++++++++-----
+ orchestrator.py      | 13 ++++++---
+ qa_agent.py          | 10 ++++---
+ report_generator.py  | 15 ++++++-----
+ static/css/style.css | 12 +++++++++
+ static/js/app.js     | 35 +++++++++++++++++++++---
+ static/js/chat.js    |  4 +--
+ templates/index.html | 17 ++++++------
+ vector_store.py      | 63 +++++++++++++++++++++++++++++++++++--------
+ 10 files changed, 190 insertions(+), 44 deletions(-)
+
+diff --git a/app/main.py b/app/main.py
+index 1b12aee..1971a43 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -706,6 +706,7 @@ async def create_user_dashboard_chart(
+ 
+     try:
+         agent = GraphAgent()
++        agent.user_id = user_id
+         result = await asyncio.to_thread(agent.run, prompt)
+         status_val = result.get("status")
+         chart_paths = result.get("chart_paths") or []
+diff --git a/graph_agent.py b/graph_agent.py
+index 3d6d4dd..88c2736 100644
+--- a/graph_agent.py
++++ b/graph_agent.py
+@@ -412,6 +412,44 @@ def generate_custom_graph(query: str):
+ 
+ 	return None
+ 
++PAPER_PALETTE = ["#1C1710", "#A86A12", "#2E7D4F", "#B5342A", "#6E6455", "#8C7B5E", "#4A6B8A", "#7A3E2E"]
++
++
++def _figure_has_data(fig) -> bool:
++	"""A chart with a title but no traces (or only empty traces) is worse
++	than no chart: it renders as an empty box like the old Payment Status pie."""
++	try:
++		for trace in getattr(fig, "data", []) or []:
++			x = getattr(trace, "x", None)
++			y = getattr(trace, "y", None)
++			labels = getattr(trace, "labels", None)
++			values = getattr(trace, "values", None)
++			if labels is not None and values is not None and len(labels) and len(values):
++				return True
++			if x is not None and y is not None and len(x) and len(y):
++				return True
++		return False
++	except Exception:
++		return True  # never drop a figure we cannot inspect
++
++
++def _apply_paper_theme(fig) -> None:
++	"""Restyle a Plotly figure to the paper-invoice theme (no default blues)."""
++	fig.update_layout(
++		paper_bgcolor="#FDFBF5",
++		plot_bgcolor="#FDFBF5",
++		font=dict(family="Inter, sans-serif", color="#1C1710"),
++		margin=dict(l=40, r=40, t=50, b=40),
++	)
++	for idx, trace in enumerate(getattr(fig, "data", []) or []):
++		if getattr(trace, "type", "") == "bar":
++			trace.marker = dict(color=PAPER_PALETTE[idx % len(PAPER_PALETTE)])
++		elif getattr(trace, "type", "") == "pie":
++			trace.marker = dict(colors=PAPER_PALETTE)
++		elif getattr(trace, "type", "") == "scatter" and getattr(trace, "mode", "") != "markers+text":
++			trace.line = dict(color=PAPER_PALETTE[0])
++
++
+ class GraphAgent:
+ 	"""
+ 	Visual & Knowledge Graph Sub-Agent for Orchestrator.
+@@ -421,6 +459,7 @@ class GraphAgent:
+ 	def __init__(self, llm=None, index_path=DEFAULT_INDEX_PATH):
+ 		self.llm = llm or ChatGroq(model=GROQ_MODEL_NAME, api_key=GROQ_API_KEY, temperature=0)
+ 		self.index_path = index_path
++		self.user_id = None  # set by orchestrator; scopes all data reads
+ 		self.tools = [
+ 			build_knowledge_graph,
+ 			generate_dashboard,
+@@ -440,6 +479,12 @@ class GraphAgent:
+ 			"error": str | None
+ 		}
+ 		"""
++		# Scope all invoice-data reads in this run to the owning user
++		try:
++			from vector_store import set_current_user_id as _set_uid
++			_set_uid(self.user_id)
++		except Exception:
++			pass
+ 		if not os.path.exists(self.index_path) or not os.listdir(self.index_path):
+ 			return {
+ 				"status": "failed",
+@@ -506,7 +551,17 @@ class GraphAgent:
+ 
+ 			# Normalize figures: always return a list of figures
+ 			raw_figures = result if isinstance(result, list) else [result]
+-			figures = [f for f in raw_figures if f is not None]
++			figures = [f for f in raw_figures if f is not None and _figure_has_data(f)]
++
++			if not figures:
++				return {
++					"status": "failed",
++					"chart_type": tool_name,
++					"figures": [],
++					"chart_paths": [],
++					"message": "The chart came back empty, so nothing was pinned. Try rephrasing the request.",
++					"error": "All generated figures had no data"
++				}
+ 
+ 			chart_paths = []
+ 			static_charts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "charts")
+@@ -516,12 +571,7 @@ class GraphAgent:
+ 			import datetime as _dt
+ 			for idx, fig in enumerate(figures):
+ 				try:
+-					fig.update_layout(
+-						paper_bgcolor="#FDFBF5",
+-						plot_bgcolor="#FDFBF5",
+-						font=dict(family="Inter, sans-serif", color="#1C1710"),
+-						margin=dict(l=40, r=40, t=50, b=40),
+-					)
++					_apply_paper_theme(fig)
+ 					chart_id = f"chart_{_dt.datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(_uuid.uuid4())[:8]}_{idx}.html"
+ 					chart_file_path = os.path.join(static_charts_dir, chart_id)
+ 					fig.write_html(chart_file_path, include_plotlyjs="cdn", full_html=True, config={"responsive": True})
+diff --git a/orchestrator.py b/orchestrator.py
+index 1a123bf..996c9c4 100644
+--- a/orchestrator.py
++++ b/orchestrator.py
+@@ -274,11 +274,12 @@ class MainOrchestrator:
+             max_tokens=1000,
+         )
+ 
+-        # Build specialist agents
+-        self._qa_agent = _QAAgent()
++        # Build specialist agents (scoped to this orchestrator's user)
++        self._qa_agent = _QAAgent(user_id=self.user_id)
+         self._ocr_agent = _OCRAgent()
+         self._graph_agent = _GraphAgent(llm=self._llm)
+-        self._report_agent = _ReportAgent()
++        self._graph_agent.user_id = self.user_id
++        self._report_agent = _ReportAgent(user_id=self.user_id)
+ 
+         # Build tools
+         self._tools = self._create_tools()
+@@ -314,7 +315,7 @@ class MainOrchestrator:
+             Always returns the full extracted invoice data so you can use it for further reasoning.
+             """
+             if store:
+-                result = ocr.process_and_index_invoice(file)
++                result = ocr.process_and_index_invoice(file, user_id=self.user_id)
+             else:
+                 result = ocr.extract_only(file)
+ 
+@@ -389,6 +390,10 @@ class MainOrchestrator:
+             Caller-supplied deduplication token for the user message.
+             If the same key is sent again (retry), the message is not saved twice.
+         """
++        # Scope every invoice-data read in this request to the owner
++        from vector_store import set_current_user_id as _set_uid
++        _set_uid(self.user_id)
++
+         # 1. Save user message (with deduplication)
+         save_message(
+             conversation_id=self.conversation_id,
+diff --git a/qa_agent.py b/qa_agent.py
+index d735aea..8b0be47 100644
+--- a/qa_agent.py
++++ b/qa_agent.py
+@@ -40,6 +40,7 @@ class QAState(TypedDict):
+ 	vector_search_prompt: Optional[str]  # Query string for vector store if needed
+ 	retrieved_chunks: Optional[str]      # Chunks retrieved from vector store
+ 	final_result: Optional[str]          # Final answer generated for user
++	user_id: Optional[str]               # Owner of the data; scopes every read
+ 
+ 
+ # -------------------------------------------------------------
+@@ -132,7 +133,8 @@ def node_vector_search(state: QAState) -> dict:
+ 		retrieved_text = semantic_search_text(
+ 			query=search_prompt,
+ 			top_k=top_k_val,
+-			index_path=index_path
++			index_path=index_path,
++			user_id=state.get("user_id"),
+ 		)
+ 		return {"retrieved_chunks": retrieved_text}
+ 	except Exception as e:
+@@ -239,8 +241,9 @@ qa_graph_app = build_qa_graph()
+ class QAAgent:
+ 	"""QA & Reasoning Sub-Agent for Orchestrator."""
+ 
+-	def __init__(self, index_path: str = DEFAULT_INDEX_PATH):
++	def __init__(self, index_path: str = DEFAULT_INDEX_PATH, user_id: str = None):
+ 		self.index_path = index_path
++		self.user_id = str(user_id) if user_id is not None else None
+ 
+ 	def answer(self, question: str, chat_history: list = None) -> dict:
+ 		"""
+@@ -263,7 +266,7 @@ class QAAgent:
+ 
+ 		try:
+ 			index = load_index(self.index_path)
+-			matrix = get_all_invoices_matrix(index)
++			matrix = get_all_invoices_matrix(index, user_id=self.user_id)
+ 
+ 			initial_state: QAState = {
+ 				"query": question,
+@@ -273,6 +276,7 @@ class QAAgent:
+ 				"requires_vector_search": False,
+ 				"top_k": 5,
+ 				"retrieval_mode": "matrix",
++				"user_id": self.user_id,
+ 				"vector_search_prompt": None,
+ 				"retrieved_chunks": None,
+ 				"final_result": None
+diff --git a/report_generator.py b/report_generator.py
+index f0524a2..e28461c 100644
+--- a/report_generator.py
++++ b/report_generator.py
+@@ -47,6 +47,7 @@ class EXState(TypedDict):
+ 	status: str
+ 	record_count: int
+ 	error: Optional[str]
++	user_id: Optional[str]
+ 
+ 
+ # -------------------------------------------------------------
+@@ -139,7 +140,7 @@ def prepare_matrix_rows(state: EXState) -> dict:
+ 	Used when vector search is not required.
+ 	"""
+ 	index_path = state.get("index_path", DEFAULT_INDEX_PATH)
+-	invoices = get_all_invoices(index_path=index_path)
++	invoices = get_all_invoices(index_path=index_path, user_id=state.get("user_id"))
+ 	matched_ids = set(state.get("matched_invoice_ids", []))
+ 
+ 	rows = []
+@@ -191,7 +192,7 @@ def vector_search(state: EXState) -> dict:
+ 	index_path = state.get("index_path", DEFAULT_INDEX_PATH)
+ 
+ 	try:
+-		nodes = semantic_search_nodes(query=search_prompt, top_k=top_k_val, index_path=index_path)
++		nodes = semantic_search_nodes(query=search_prompt, top_k=top_k_val, index_path=index_path, user_id=state.get("user_id"))
+ 		return {"retrieved_chunks": nodes}
+ 	except Exception:
+ 		return {"retrieved_chunks": []}
+@@ -203,7 +204,7 @@ def extract_vector_rows(state: EXState) -> dict:
+ 	and matched invoices in the docstore.
+ 	"""
+ 	index_path = state.get("index_path", DEFAULT_INDEX_PATH)
+-	invoices = get_all_invoices(index_path=index_path)
++	invoices = get_all_invoices(index_path=index_path, user_id=state.get("user_id"))
+ 	matched_ids = set(state.get("matched_invoice_ids", []))
+ 	retrieved_nodes = state.get("retrieved_chunks") or []
+ 
+@@ -362,8 +363,9 @@ ex_graph_app = build_ex_graph()
+ class ReportAgent:
+ 	"""Excel Reporting Sub-Agent for Orchestrator."""
+ 
+-	def __init__(self, index_path: str = DEFAULT_INDEX_PATH):
++	def __init__(self, index_path: str = DEFAULT_INDEX_PATH, user_id: str = None):
+ 		self.index_path = index_path
++		self.user_id = str(user_id) if user_id is not None else None
+ 
+ 	def generate_report(self, query: str = "", output_path: str = "invoice_report.xlsx") -> dict:
+ 		"""
+@@ -390,7 +392,7 @@ class ReportAgent:
+ 
+ 		try:
+ 			index = load_index(self.index_path)
+-			matrix = get_all_invoices_matrix(index)
++			matrix = get_all_invoices_matrix(index, user_id=self.user_id)
+ 
+ 			initial_state: EXState = {
+ 				"query": query,
+@@ -409,7 +411,8 @@ class ReportAgent:
+ 				"final_result": None,
+ 				"status": "failed",
+ 				"record_count": 0,
+-				"error": None
++				"error": None,
++				"user_id": self.user_id
+ 			}
+ 
+ 			result_state = ex_graph_app.invoke(initial_state)
+diff --git a/static/css/style.css b/static/css/style.css
+index 806fc7b..c000cdb 100644
+--- a/static/css/style.css
++++ b/static/css/style.css
+@@ -6,6 +6,9 @@
+ @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..800;1,9..144,400..700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&family=Inter:wght@400;500;600;700&display=swap');
+ 
+ :root {
++  /* Force light form controls: without this, browsers in dark mode render
++     password inputs as black boxes */
++  color-scheme: light;
+   /* Strict Palette Tokens */
+   --paper: #F6F1E7;
+   --paper-card: #FDFBF5;
+@@ -1591,6 +1594,15 @@ body::before {
+   background: #FFFFFF;
+ }
+ 
++/* Keep autofill consistent with the paper theme */
++.auth-input:-webkit-autofill,
++.auth-input:-webkit-autofill:hover,
++.auth-input:-webkit-autofill:focus {
++  -webkit-text-fill-color: var(--ink);
++  -webkit-box-shadow: 0 0 0 1000px #FAF7EE inset;
++  caret-color: var(--ink);
++}
++
+ .password-input-wrapper {
+   box-sizing: border-box;
+   position: relative;
+diff --git a/static/js/app.js b/static/js/app.js
+index 973e929..09a6495 100644
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -43,9 +43,9 @@ export function showToast(message, type = "info") {
+   const toast = document.createElement("div");
+   toast.className = `toast ${type}`;
+ 
+-  let stampLabel = "[INFO]";
+-  if (type === "success") stampLabel = "[FILED]";
+-  if (type === "error") stampLabel = "[ALERT]";
++  let stampLabel = "NOTICE";
++  if (type === "success") stampLabel = "DONE";
++  if (type === "error") stampLabel = "ALERT";
+ 
+   toast.innerHTML = `
+     <span class="stamp-badge ${type === "error" ? "failed" : (type === "success" ? "paid" : "pending")}" style="font-size:0.6rem; padding:0.1rem 0.35rem;">
+@@ -108,6 +108,13 @@ export function setAuthState(user) {
+     if (userEmailDisplay) userEmailDisplay.textContent = user.email || "";
+     if (userBadgeContainer) userBadgeContainer.style.display = "flex";
+     if (authOverlay) authOverlay.classList.add("hidden");
++    // Reveal the app shell only for authenticated users
++    const appRoot = document.getElementById("app-root");
++    if (appRoot) {
++      appRoot.style.display = "";
++      appRoot.removeAttribute("inert");
++      appRoot.removeAttribute("aria-hidden");
++    }
+   } else {
+     state.userId = "default_user";
+     localStorage.removeItem("invoice_app_user_id");
+@@ -115,6 +122,13 @@ export function setAuthState(user) {
+     if (userBadgeContainer) userBadgeContainer.style.display = "none";
+     if (authOverlay) authOverlay.classList.remove("hidden");
+     showAuthScreen("login");
++    // Keep the whole dashboard out of unauthenticated users' DOM view
++    const appRoot = document.getElementById("app-root");
++    if (appRoot) {
++      appRoot.style.display = "none";
++      appRoot.setAttribute("inert", "");
++      appRoot.setAttribute("aria-hidden", "true");
++    }
+   }
+ }
+ 
+@@ -141,6 +155,13 @@ function showAuthScreen(screenName) {
+     if (el) el.style.display = s === screenName ? "block" : "none";
+   });
+ 
++  // Clear passphrase fields on every switch so a secret typed on one
++  // auth screen never sits in another screen's field
++  ["login-password", "signup-password", "reset-new-password"].forEach((id) => {
++    const input = document.getElementById(id);
++    if (input) input.value = "";
++  });
++
+   // Clear notices
+   hideNotice("login-unverified-notice");
+   hideNotice("login-error-notice");
+@@ -570,6 +591,14 @@ function updateDashboardMetrics(invoices) {
+   if (elTotalCount) elTotalCount.textContent = totalCount.toString();
+   if (elPaidRatio) elPaidRatio.textContent = `${paidRatio}%`;
+   if (elVendorsCount) elVendorsCount.textContent = vendors.size.toString();
++
++  // Keep currency labels in sync with the data's dominant currency
++  const domCur = dominantCurrency(invoices) || "INR";
++  const curLabel = document.getElementById("kpi-currency-label");
++  if (curLabel) curLabel.textContent = `${domCur} (${currencySymbol(domCur)})`;
++  document.querySelectorAll(".amount-col-header").forEach((th) => {
++    th.textContent = `AMOUNT (${domCur})`;
++  });
+ }
+ 
+ function renderRecentInvoices(invoices) {
+diff --git a/static/js/chat.js b/static/js/chat.js
+index 47d69e8..3bcc80e 100644
+--- a/static/js/chat.js
++++ b/static/js/chat.js
+@@ -269,9 +269,9 @@ export function initChat({ getSessionContext, setConversationId, showToast }) {
+           appendUserMessage(m.content);
+         } else if (m.role === "assistant") {
+           appendAssistantMessage(m.content);
+-        } else if (m.role === "system") {
+-          appendSystemMessage(m.content);
+         }
++        // system messages are internal AI context (upload notices etc.)
++        // and are never rendered in the user-facing thread
+       });
+     } catch (err) {
+       removeMessage(loadingId);
+diff --git a/templates/index.html b/templates/index.html
+index fecf8de..f8e18a4 100644
+--- a/templates/index.html
++++ b/templates/index.html
+@@ -3,6 +3,7 @@
+ <head>
+   <meta charset="UTF-8">
+   <meta name="viewport" content="width=device-width, initial-scale=1.0">
++  <meta name="color-scheme" content="light">
+   <title>AutoInvoice — Invoice Intelligence Ledger</title>
+   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
+   <meta name="description" content="Tactile, editorial financial ledger with rubber-stamped paper invoice aesthetics, RapidOCR, and conversational AI.">
+@@ -20,7 +21,7 @@
+   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+ </head>
+ <body>
+-  <div id="app-root">
++  <div id="app-root" style="display:none;" inert aria-hidden="true">
+ 
+     <!-- ─────────────────────────────────────────────────────────────────── -->
+     <!-- Sidebar: Ledger Index Spine -->
+@@ -158,7 +159,7 @@
+               <div class="hero-spend-value" id="stat-total-spend">₹0.00</div>
+               <div class="hero-spend-meta">
+                 <span class="kpi-subtext">AVERAGE VOUCHER: <strong id="stat-avg-spend" style="color:var(--ink);">₹0.00</strong></span>
+-                <span class="kpi-subtext">CURRENCY: <strong>INR (₹)</strong></span>
++                <span class="kpi-subtext">CURRENCY: <strong id="kpi-currency-label">INR (₹)</strong></span>
+               </div>
+             </div>
+ 
+@@ -389,7 +390,7 @@
+                       <th>INVOICE #</th>
+                       <th>VENDOR ENTITY</th>
+                       <th>DATE</th>
+-                      <th class="th-amount">AMOUNT (USD)</th>
++                      <th class="th-amount amount-col-header">AMOUNT</th>
+                       <th style="text-align:right;">STATUS</th>
+                     </tr>
+                   </thead>
+@@ -653,7 +654,7 @@
+                     <th>VENDOR ENTITY</th>
+                     <th>BUYER / CUSTOMER</th>
+                     <th>DATE</th>
+-                    <th class="th-amount">AMOUNT (USD)</th>
++                    <th class="th-amount amount-col-header">AMOUNT</th>
+                     <th style="text-align:center;">SETTLEMENT</th>
+                     <th style="text-align:right;">ACTION</th>
+                   </tr>
+@@ -679,7 +680,7 @@
+     <div class="modal-box">
+       <h3>EXPUNGE RECORD FROM LEDGER</h3>
+       <p style="font-family:var(--font-sans); font-size:0.88rem; color:var(--ink-muted); line-height:1.6; margin:0.75rem 0 1.25rem 0;">
+-        Confirm deletion of invoice <strong id="delete-modal-inv-num" style="color:var(--ink); font-family:var(--font-mono);">record</strong> from ChromaDB vector storage and index records. This action cannot be revoked.
++        Confirm deletion of invoice <strong id="delete-modal-inv-num" style="color:var(--ink); font-family:var(--font-mono);">record</strong> from your ledger. This action cannot be revoked.
+       </p>
+       <div class="modal-actions">
+         <button class="btn-secondary" id="btn-modal-cancel">CANCEL</button>
+@@ -726,7 +727,7 @@
+           <div class="auth-form-group">
+             <label for="login-password">Ledger Passphrase</label>
+             <div class="password-input-wrapper">
+-              <input type="password" id="login-password" class="auth-input" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" required autocomplete="current-password">
++              <input type="password" id="login-password" class="auth-input" placeholder="Enter your passphrase" required autocomplete="current-password">
+               <button type="button" class="password-toggle-btn" aria-label="Show passphrase" title="Show passphrase">
+                 <svg class="eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+@@ -771,7 +772,7 @@
+           <div class="auth-form-group">
+             <label for="signup-password">Create Passphrase (Min. 8 Characters)</label>
+             <div class="password-input-wrapper">
+-              <input type="password" id="signup-password" class="auth-input" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" minlength="8" required autocomplete="new-password">
++              <input type="password" id="signup-password" class="auth-input" placeholder="Enter your passphrase" minlength="8" required autocomplete="new-password">
+               <button type="button" class="password-toggle-btn" aria-label="Show passphrase" title="Show passphrase">
+                 <svg class="eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+@@ -891,7 +892,7 @@
+           <div class="auth-form-group">
+             <label for="reset-new-password">New Passphrase (Min. 8 Characters)</label>
+             <div class="password-input-wrapper">
+-              <input type="password" id="reset-new-password" class="auth-input" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" minlength="8" required>
++              <input type="password" id="reset-new-password" class="auth-input" placeholder="Enter your passphrase" minlength="8" required>
+               <button type="button" class="password-toggle-btn" aria-label="Show passphrase" title="Show passphrase">
+                 <svg class="eye-show" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                   <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+diff --git a/vector_store.py b/vector_store.py
+index 6337db1..e368114 100644
+--- a/vector_store.py
++++ b/vector_store.py
+@@ -29,6 +29,31 @@ from config import DEFAULT_CHROMA_PATH, DEFAULT_CHROMA_COLLECTION, DEFAULT_INDEX
+ logger = logging.getLogger(__name__)
+ 
+ 
++# -------------------------------------------------------------
++# 0. Per-request user scoping (multi-tenancy guard)
++# -------------------------------------------------------------
++# Agents and tools that read invoice data MUST be scoped to the
++# current user. Callers either pass user_id explicitly or set this
++# context variable once per request (the orchestrator does). Data
++# functions resolve the effective user as: explicit arg -> context.
++import contextvars as _contextvars
++
++_CURRENT_USER_ID: "_contextvars.ContextVar[Optional[str]]" = _contextvars.ContextVar(
++    "autoinvoice_current_user_id", default=None
++)
++
++
++def set_current_user_id(user_id: Optional[str]) -> None:
++    """Set the user scope for invoice-data reads in this context."""
++    _CURRENT_USER_ID.set(str(user_id) if user_id is not None else None)
++
++
++def _resolve_user_id(user_id: Optional[str]) -> Optional[str]:
++    if user_id is not None:
++        return str(user_id)
++    return _CURRENT_USER_ID.get()
++
++
+ # -------------------------------------------------------------
+ # 1. Compatibility Node Wrapper (Emulates LlamaIndex/LangChain Node)
+ # -------------------------------------------------------------
+@@ -284,6 +309,7 @@ def get_all_invoices(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id:
+ 	Handles both top-level and nested 'fields' structures gracefully.
+ 	Optionally filters by user_id for strict user isolation.
+ 	"""
++	user_id = _resolve_user_id(user_id)
+ 	col = index if hasattr(index, "get") else get_collection(path=index_path)
+ 	where_filter = {"user_id": str(user_id)} if user_id else None
+ 	try:
+@@ -303,10 +329,11 @@ def get_all_invoices(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id:
+ 	invoices = []
+ 	for doc_id, doc_text, meta in zip(ids, docs, metadatas):
+ 		meta = meta or {}
+-		# Enforce user filtering in memory as well
++		# Enforce user filtering in memory as well (strict: docs without a
++		# matching user_id are excluded whenever a user scope is active)
+ 		if user_id:
+ 			doc_user = meta.get("user_id")
+-			if doc_user and str(doc_user) != str(user_id):
++			if not doc_user or str(doc_user) != str(user_id):
+ 				continue
+ 
+ 		try:
+@@ -373,12 +400,13 @@ def get_all_invoices_df(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_
+ 	return pd.DataFrame(records)
+ 
+ 
+-def get_all_invoices_matrix(index=None, index_path: str = DEFAULT_CHROMA_PATH) -> str:
++def get_all_invoices_matrix(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id: Optional[str] = None) -> str:
+ 	"""
+-	Build a single unified Markdown Summary Matrix table across all invoices.
++	Build a single unified Markdown Summary Matrix table across the current user's invoices.
+ 	Used by QA Agent, Graph Agent, and Report Generator to perform rapid exact math.
++	Scoped to user_id (explicit or context) so one user never sees another's data.
+ 	"""
+-	df = get_all_invoices_df(index=index, index_path=index_path)
++	df = get_all_invoices_df(index=index, index_path=index_path, user_id=_resolve_user_id(user_id))
+ 	if df.empty:
+ 		return "No invoices found in storage."
+ 	return df.to_markdown(index=False)
+@@ -391,19 +419,24 @@ def semantic_search_nodes(
+ 	query: str,
+ 	top_k: int = 5,
+ 	index=None,
+-	index_path: str = DEFAULT_CHROMA_PATH
++	index_path: str = DEFAULT_CHROMA_PATH,
++	user_id: Optional[str] = None
+ ) -> List[ChromaNode]:
+ 	"""
+ 	Perform semantic similarity search on ChromaDB and return retrieved node objects.
++	Scoped to the effective user (explicit arg or context) when one is set.
+ 	"""
+ 	col = index if hasattr(index, "query") else get_collection(path=index_path)
+ 	count = col.count()
+ 	if count == 0:
+ 		return []
+ 
+-	n_results = max(1, min(top_k, count))
++	effective_user = _resolve_user_id(user_id)
++	where_filter = {"user_id": effective_user} if effective_user else None
++	# Over-fetch when filtering so the scoped result set can still fill top_k
++	n_results = max(1, min(top_k * 4 if where_filter else top_k, count))
+ 	try:
+-		res = col.query(query_texts=[query], n_results=n_results)
++		res = col.query(query_texts=[query], n_results=n_results, where=where_filter) if where_filter else col.query(query_texts=[query], n_results=n_results)
+ 	except Exception as exc:
+ 		logger.error("ChromaDB query error for '%s': %s", query, exc)
+ 		return []
+@@ -414,7 +447,14 @@ def semantic_search_nodes(
+ 
+ 	nodes = []
+ 	for doc_id, doc_text, meta in zip(ids_list, docs_list, metas_list):
+-		nodes.append(ChromaNode(text=doc_text, metadata=meta or {}, id=doc_id))
++		meta = meta or {}
++		if effective_user:
++			doc_user = meta.get("user_id")
++			if not doc_user or str(doc_user) != effective_user:
++				continue
++		nodes.append(ChromaNode(text=doc_text, metadata=meta, id=doc_id))
++		if len(nodes) >= top_k:
++			break
+ 
+ 	return nodes
+ 
+@@ -423,12 +463,13 @@ def semantic_search_text(
+ 	query: str,
+ 	top_k: int = 5,
+ 	index=None,
+-	index_path: str = DEFAULT_CHROMA_PATH
++	index_path: str = DEFAULT_CHROMA_PATH,
++	user_id: Optional[str] = None
+ ) -> str:
+ 	"""
+ 	Perform semantic similarity search on ChromaDB and return formatted text snippets.
+ 	"""
+-	nodes = semantic_search_nodes(query=query, top_k=top_k, index=index, index_path=index_path)
++	nodes = semantic_search_nodes(query=query, top_k=top_k, index=index, index_path=index_path, user_id=user_id)
+ 	if not nodes:
+ 		return ""
+ 
+-- 
+2.43.0
+

@@ -30,6 +30,31 @@ logger = logging.getLogger(__name__)
 
 
 # -------------------------------------------------------------
+# 0. Per-request user scoping (multi-tenancy guard)
+# -------------------------------------------------------------
+# Agents and tools that read invoice data MUST be scoped to the
+# current user. Callers either pass user_id explicitly or set this
+# context variable once per request (the orchestrator does). Data
+# functions resolve the effective user as: explicit arg -> context.
+import contextvars as _contextvars
+
+_CURRENT_USER_ID: "_contextvars.ContextVar[Optional[str]]" = _contextvars.ContextVar(
+    "autoinvoice_current_user_id", default=None
+)
+
+
+def set_current_user_id(user_id: Optional[str]) -> None:
+    """Set the user scope for invoice-data reads in this context."""
+    _CURRENT_USER_ID.set(str(user_id) if user_id is not None else None)
+
+
+def _resolve_user_id(user_id: Optional[str]) -> Optional[str]:
+    if user_id is not None:
+        return str(user_id)
+    return _CURRENT_USER_ID.get()
+
+
+# -------------------------------------------------------------
 # 1. Compatibility Node Wrapper (Emulates LlamaIndex/LangChain Node)
 # -------------------------------------------------------------
 class ChromaNode:
@@ -284,6 +309,7 @@ def get_all_invoices(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id:
 	Handles both top-level and nested 'fields' structures gracefully.
 	Optionally filters by user_id for strict user isolation.
 	"""
+	user_id = _resolve_user_id(user_id)
 	col = index if hasattr(index, "get") else get_collection(path=index_path)
 	where_filter = {"user_id": str(user_id)} if user_id else None
 	try:
@@ -303,10 +329,11 @@ def get_all_invoices(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id:
 	invoices = []
 	for doc_id, doc_text, meta in zip(ids, docs, metadatas):
 		meta = meta or {}
-		# Enforce user filtering in memory as well
+		# Enforce user filtering in memory as well (strict: docs without a
+		# matching user_id are excluded whenever a user scope is active)
 		if user_id:
 			doc_user = meta.get("user_id")
-			if doc_user and str(doc_user) != str(user_id):
+			if not doc_user or str(doc_user) != str(user_id):
 				continue
 
 		try:
@@ -373,12 +400,13 @@ def get_all_invoices_df(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_
 	return pd.DataFrame(records)
 
 
-def get_all_invoices_matrix(index=None, index_path: str = DEFAULT_CHROMA_PATH) -> str:
+def get_all_invoices_matrix(index=None, index_path: str = DEFAULT_CHROMA_PATH, user_id: Optional[str] = None) -> str:
 	"""
-	Build a single unified Markdown Summary Matrix table across all invoices.
+	Build a single unified Markdown Summary Matrix table across the current user's invoices.
 	Used by QA Agent, Graph Agent, and Report Generator to perform rapid exact math.
+	Scoped to user_id (explicit or context) so one user never sees another's data.
 	"""
-	df = get_all_invoices_df(index=index, index_path=index_path)
+	df = get_all_invoices_df(index=index, index_path=index_path, user_id=_resolve_user_id(user_id))
 	if df.empty:
 		return "No invoices found in storage."
 	return df.to_markdown(index=False)
@@ -391,19 +419,24 @@ def semantic_search_nodes(
 	query: str,
 	top_k: int = 5,
 	index=None,
-	index_path: str = DEFAULT_CHROMA_PATH
+	index_path: str = DEFAULT_CHROMA_PATH,
+	user_id: Optional[str] = None
 ) -> List[ChromaNode]:
 	"""
 	Perform semantic similarity search on ChromaDB and return retrieved node objects.
+	Scoped to the effective user (explicit arg or context) when one is set.
 	"""
 	col = index if hasattr(index, "query") else get_collection(path=index_path)
 	count = col.count()
 	if count == 0:
 		return []
 
-	n_results = max(1, min(top_k, count))
+	effective_user = _resolve_user_id(user_id)
+	where_filter = {"user_id": effective_user} if effective_user else None
+	# Over-fetch when filtering so the scoped result set can still fill top_k
+	n_results = max(1, min(top_k * 4 if where_filter else top_k, count))
 	try:
-		res = col.query(query_texts=[query], n_results=n_results)
+		res = col.query(query_texts=[query], n_results=n_results, where=where_filter) if where_filter else col.query(query_texts=[query], n_results=n_results)
 	except Exception as exc:
 		logger.error("ChromaDB query error for '%s': %s", query, exc)
 		return []
@@ -414,7 +447,14 @@ def semantic_search_nodes(
 
 	nodes = []
 	for doc_id, doc_text, meta in zip(ids_list, docs_list, metas_list):
-		nodes.append(ChromaNode(text=doc_text, metadata=meta or {}, id=doc_id))
+		meta = meta or {}
+		if effective_user:
+			doc_user = meta.get("user_id")
+			if not doc_user or str(doc_user) != effective_user:
+				continue
+		nodes.append(ChromaNode(text=doc_text, metadata=meta, id=doc_id))
+		if len(nodes) >= top_k:
+			break
 
 	return nodes
 
@@ -423,12 +463,13 @@ def semantic_search_text(
 	query: str,
 	top_k: int = 5,
 	index=None,
-	index_path: str = DEFAULT_CHROMA_PATH
+	index_path: str = DEFAULT_CHROMA_PATH,
+	user_id: Optional[str] = None
 ) -> str:
 	"""
 	Perform semantic similarity search on ChromaDB and return formatted text snippets.
 	"""
-	nodes = semantic_search_nodes(query=query, top_k=top_k, index=index, index_path=index_path)
+	nodes = semantic_search_nodes(query=query, top_k=top_k, index=index, index_path=index_path, user_id=user_id)
 	if not nodes:
 		return ""
 

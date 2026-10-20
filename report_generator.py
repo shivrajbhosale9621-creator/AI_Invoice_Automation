@@ -47,6 +47,7 @@ class EXState(TypedDict):
 	status: str
 	record_count: int
 	error: Optional[str]
+	user_id: Optional[str]
 
 
 # -------------------------------------------------------------
@@ -139,7 +140,7 @@ def prepare_matrix_rows(state: EXState) -> dict:
 	Used when vector search is not required.
 	"""
 	index_path = state.get("index_path", DEFAULT_INDEX_PATH)
-	invoices = get_all_invoices(index_path=index_path)
+	invoices = get_all_invoices(index_path=index_path, user_id=state.get("user_id"))
 	matched_ids = set(state.get("matched_invoice_ids", []))
 
 	rows = []
@@ -191,7 +192,7 @@ def vector_search(state: EXState) -> dict:
 	index_path = state.get("index_path", DEFAULT_INDEX_PATH)
 
 	try:
-		nodes = semantic_search_nodes(query=search_prompt, top_k=top_k_val, index_path=index_path)
+		nodes = semantic_search_nodes(query=search_prompt, top_k=top_k_val, index_path=index_path, user_id=state.get("user_id"))
 		return {"retrieved_chunks": nodes}
 	except Exception:
 		return {"retrieved_chunks": []}
@@ -203,7 +204,7 @@ def extract_vector_rows(state: EXState) -> dict:
 	and matched invoices in the docstore.
 	"""
 	index_path = state.get("index_path", DEFAULT_INDEX_PATH)
-	invoices = get_all_invoices(index_path=index_path)
+	invoices = get_all_invoices(index_path=index_path, user_id=state.get("user_id"))
 	matched_ids = set(state.get("matched_invoice_ids", []))
 	retrieved_nodes = state.get("retrieved_chunks") or []
 
@@ -362,8 +363,9 @@ ex_graph_app = build_ex_graph()
 class ReportAgent:
 	"""Excel Reporting Sub-Agent for Orchestrator."""
 
-	def __init__(self, index_path: str = DEFAULT_INDEX_PATH):
+	def __init__(self, index_path: str = DEFAULT_INDEX_PATH, user_id: str = None):
 		self.index_path = index_path
+		self.user_id = str(user_id) if user_id is not None else None
 
 	def generate_report(self, query: str = "", output_path: str = "invoice_report.xlsx") -> dict:
 		"""
@@ -390,7 +392,7 @@ class ReportAgent:
 
 		try:
 			index = load_index(self.index_path)
-			matrix = get_all_invoices_matrix(index)
+			matrix = get_all_invoices_matrix(index, user_id=self.user_id)
 
 			initial_state: EXState = {
 				"query": query,
@@ -409,7 +411,8 @@ class ReportAgent:
 				"final_result": None,
 				"status": "failed",
 				"record_count": 0,
-				"error": None
+				"error": None,
+				"user_id": self.user_id
 			}
 
 			result_state = ex_graph_app.invoke(initial_state)

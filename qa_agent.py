@@ -40,6 +40,7 @@ class QAState(TypedDict):
 	vector_search_prompt: Optional[str]  # Query string for vector store if needed
 	retrieved_chunks: Optional[str]      # Chunks retrieved from vector store
 	final_result: Optional[str]          # Final answer generated for user
+	user_id: Optional[str]               # Owner of the data; scopes every read
 
 
 # -------------------------------------------------------------
@@ -132,7 +133,8 @@ def node_vector_search(state: QAState) -> dict:
 		retrieved_text = semantic_search_text(
 			query=search_prompt,
 			top_k=top_k_val,
-			index_path=index_path
+			index_path=index_path,
+			user_id=state.get("user_id"),
 		)
 		return {"retrieved_chunks": retrieved_text}
 	except Exception as e:
@@ -239,8 +241,9 @@ qa_graph_app = build_qa_graph()
 class QAAgent:
 	"""QA & Reasoning Sub-Agent for Orchestrator."""
 
-	def __init__(self, index_path: str = DEFAULT_INDEX_PATH):
+	def __init__(self, index_path: str = DEFAULT_INDEX_PATH, user_id: str = None):
 		self.index_path = index_path
+		self.user_id = str(user_id) if user_id is not None else None
 
 	def answer(self, question: str, chat_history: list = None) -> dict:
 		"""
@@ -263,7 +266,7 @@ class QAAgent:
 
 		try:
 			index = load_index(self.index_path)
-			matrix = get_all_invoices_matrix(index)
+			matrix = get_all_invoices_matrix(index, user_id=self.user_id)
 
 			initial_state: QAState = {
 				"query": question,
@@ -273,6 +276,7 @@ class QAAgent:
 				"requires_vector_search": False,
 				"top_k": 5,
 				"retrieval_mode": "matrix",
+				"user_id": self.user_id,
 				"vector_search_prompt": None,
 				"retrieved_chunks": None,
 				"final_result": None

@@ -6,6 +6,9 @@
 @import url('https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400..800;1,9..144,400..700&family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400;1,600&family=Inter:wght@400;500;600;700&display=swap');
 
 :root {
+  /* Force light form controls: without this, browsers in dark mode render
+     password inputs as black boxes */
+  color-scheme: light;
   /* Strict Palette Tokens */
   --paper: #F6F1E7;
   --paper-card: #FDFBF5;
@@ -1589,6 +1592,15 @@ body::before {
 .auth-input:focus {
   border-color: var(--ink);
   background: #FFFFFF;
+}
+
+/* Keep autofill consistent with the paper theme */
+.auth-input:-webkit-autofill,
+.auth-input:-webkit-autofill:hover,
+.auth-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--ink);
+  -webkit-box-shadow: 0 0 0 1000px #FAF7EE inset;
+  caret-color: var(--ink);
 }
 
 .password-input-wrapper {
