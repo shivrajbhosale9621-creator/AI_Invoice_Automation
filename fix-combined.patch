@@ -1,0 +1,291 @@
+diff --git a/alembic/versions/4b5c6d7e8f9a_invoices_unique_per_user.py b/alembic/versions/4b5c6d7e8f9a_invoices_unique_per_user.py
+new file mode 100644
+index 0000000..6b85f79
+--- /dev/null
++++ b/alembic/versions/4b5c6d7e8f9a_invoices_unique_per_user.py
+@@ -0,0 +1,41 @@
++"""make invoices uniqueness per-user (user_id, file_name)
++
++Revision ID: 4b5c6d7e8f9a
++Revises: 3a4f5b6c7d8e
++Create Date: 2026-10-21
++
++The invoices table had a global UNIQUE constraint on file_name, and the
++storage layer upserted ON CONFLICT(file_name) while reassigning user_id,
++so a second user uploading a file with the same name silently stole the
++first user's record. Uniqueness must be per user.
++"""
++from typing import Sequence, Union
++from alembic import op
++import sqlalchemy as sa
++
++
++# revision identifiers, used by Alembic.
++revision: str = '4b5c6d7e8f9a'
++down_revision: Union[str, Sequence[str], None] = '3a4f5b6c7d8e'
++branch_labels: Union[str, Sequence[str], None] = None
++depends_on: Union[str, Sequence[str], None] = None
++
++
++def upgrade() -> None:
++    bind = op.get_bind()
++    inspector = sa.inspect(bind)
++    if "invoices" not in inspector.get_table_names():
++        return
++    with op.batch_alter_table('invoices', schema=None) as batch_op:
++        batch_op.drop_constraint('uq_invoices_file_name', type_='unique')
++        batch_op.create_unique_constraint('uq_invoices_user_file', ['user_id', 'file_name'])
++
++
++def downgrade() -> None:
++    bind = op.get_bind()
++    inspector = sa.inspect(bind)
++    if "invoices" not in inspector.get_table_names():
++        return
++    with op.batch_alter_table('invoices', schema=None) as batch_op:
++        batch_op.drop_constraint('uq_invoices_user_file', type_='unique')
++        batch_op.create_unique_constraint('uq_invoices_file_name', ['file_name'])
+diff --git a/app/main.py b/app/main.py
+index 9860965..26da7ad 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -505,7 +505,11 @@ async def get_user_invoices(
+ 
+             # Match ChromaDB record
+             chroma_match = chroma_by_file.get(f_name) or chroma_by_num.get(i_num) or {}
+-            doc_id = chroma_match.get("_doc_id") or f"inv_{i_num or inv.id}"
++            if chroma_match.get("_doc_id"):
++                doc_id = chroma_match["_doc_id"]
++            else:
++                clean_fb = str(i_num or inv.id).strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
++                doc_id = f"inv_{user_id}_{clean_fb}"
+ 
+             # Parse line items from JSON if present
+             items = []
+@@ -590,7 +594,10 @@ async def delete_user_invoice(
+ 
+     # Also clean up from SQLite invoices table
+     try:
+-        clean_doc = doc_id.replace("inv_", "")
++        clean_doc = doc_id[len("inv_"):] if doc_id.startswith("inv_") else doc_id
++        user_prefix = f"{user_id}_"
++        if clean_doc.startswith(user_prefix):
++            clean_doc = clean_doc[len(user_prefix):]
+         stmt = select(Invoice).where(
+             (Invoice.user_id == current_user.id) &
+             ((Invoice.file_name == doc_id) |
+diff --git a/app/models/invoice.py b/app/models/invoice.py
+index bd8bd66..f6ef3e7 100644
+--- a/app/models/invoice.py
++++ b/app/models/invoice.py
+@@ -1,7 +1,7 @@
+ import uuid
+ from datetime import datetime, timezone
+ from typing import TYPE_CHECKING
+-from sqlalchemy import String, Float, Integer, Text, DateTime, Uuid, ForeignKey
++from sqlalchemy import String, Float, Integer, Text, DateTime, Uuid, ForeignKey, UniqueConstraint
+ from sqlalchemy.orm import Mapped, mapped_column, relationship
+ from app.core.database import Base
+ 
+@@ -15,6 +15,12 @@ def utc_now() -> datetime:
+ 
+ class Invoice(Base):
+     __tablename__ = "invoices"
++    # Uniqueness is per user: two different users may upload files with the
++    # same name (or invoices with the same number) without overwriting
++    # each other's records.
++    __table_args__ = (
++        UniqueConstraint("user_id", "file_name", name="uq_invoices_user_file"),
++    )
+ 
+     id: Mapped[int] = mapped_column(
+         Integer,
+@@ -29,7 +35,6 @@ class Invoice(Base):
+     )
+     file_name: Mapped[str] = mapped_column(
+         String(255),
+-        unique=True,
+         nullable=True,
+     )
+     vendor_name: Mapped[str] = mapped_column(
+diff --git a/ocr_engine.py b/ocr_engine.py
+index a429117..7c28d8d 100644
+--- a/ocr_engine.py
++++ b/ocr_engine.py
+@@ -27,6 +27,14 @@ from vector_store import save_invoice_to_vector_store, load_index
+ 
+ import threading
+ 
++
++class StructuringError(Exception):
++    """Raised when invoice structuring fails after all retries.
++
++    Callers must treat this as a failed extraction and reject the
++    upload; an empty invoice must never be fabricated or indexed.
++    """
++
+ # -------------------------------------------------------------
+ # 1. Helper: Resolve & Cache ONNX Model Paths and RapidOCR Singleton
+ # -------------------------------------------------------------
+@@ -174,19 +182,68 @@ def extract_text_from_file(file_path: str) -> tuple[str, float, float]:
+ # -------------------------------------------------------------
+ # 5. Step 4: Use LLM to Parse Raw OCR Text into Structured JSON
+ # -------------------------------------------------------------
++def _parse_llm_json(raw_content: str):
++	"""Best-effort parse of an LLM JSON reply; returns dict or None."""
++	if not raw_content:
++		return None
++	text = raw_content.strip()
++	if text.startswith("```"):
++		match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
++		if match:
++			text = match.group(1).strip()
++	try:
++		parsed = json.loads(text)
++		return parsed if isinstance(parsed, dict) else None
++	except json.JSONDecodeError:
++		pass
++	# Salvage: take the outermost {...} span in case of surrounding prose
++	start, end = text.find("{"), text.rfind("}")
++	if start != -1 and end > start:
++		try:
++			parsed = json.loads(text[start:end + 1])
++			return parsed if isinstance(parsed, dict) else None
++		except json.JSONDecodeError:
++			return None
++	return None
++
++
++def _structuring_is_empty(parsed: dict) -> bool:
++	"""True when a parsed result carries no usable invoice identity."""
++	if not parsed:
++		return True
++	fields = parsed.get("fields") if isinstance(parsed.get("fields"), dict) else parsed
++	vendor = str(fields.get("vendor_name") or fields.get("vendor") or "").strip()
++	total = fields.get("total_amount", fields.get("grand_total", 0))
++	try:
++		total_val = float(str(total).replace(",", "").replace("₹", "").strip() or 0)
++	except (TypeError, ValueError):
++		total_val = 0
++	return (not vendor or vendor.lower() == "unknown vendor") and total_val == 0
++
++
++def _run_structuring_chain(chain, ocr_text: str) -> str:
++	"""Invoke the structuring chain and return the raw reply text."""
++	response = chain.invoke({"ocr_text": ocr_text[:3500]})
++	return getattr(response, "content", str(response)).strip()
++
++
+ def structure_invoice_json(ocr_text: str) -> dict:
+ 	"""
+ 	Pass raw OCR text to Groq LLM with concise dynamic schema instructions.
+-	Uses capped max_tokens=800 and exponential backoff retry for transient 429s.
++
++	Reliability contract: this function NEVER fabricates an empty invoice.
++	It retries on rate limits AND on unparseable/empty outputs, and raises
++	StructuringError when every attempt fails, so the caller can reject the
++	upload instead of silently storing an 'Unknown Vendor / 0' record.
+ 	"""
+ 	if not ocr_text.strip():
+-		return {"document_type": "invoice", "fields": {}, "line_items": [], "currency": "INR"}
++		raise StructuringError("No text could be extracted from the document.")
+ 
+ 	llm = ChatGroq(
+ 		model=GROQ_MODEL_NAME,
+ 		temperature=0,
+ 		api_key=GROQ_API_KEY,
+-		max_tokens=800,
++		max_tokens=2000,
+ 	)
+ 
+ 	prompt = ChatPromptTemplate.from_template(
+@@ -202,43 +259,31 @@ OCR TEXT:
+ 
+ 	max_retries = 3
+ 	delay = 1.5
+-	raw_content = ""
++	last_error = "unknown error"
+ 
+ 	for attempt in range(max_retries):
+ 		try:
+-			response = chain.invoke({"ocr_text": ocr_text[:3500]})
+-			raw_content = getattr(response, "content", str(response)).strip()
+-			break
++			raw_content = _run_structuring_chain(chain, ocr_text)
+ 		except Exception as exc:
+ 			err_str = str(exc).lower()
+-			if ("429" in err_str or "rate limit" in err_str or "tokens" in err_str) and attempt < max_retries - 1:
+-				time.sleep(delay)
++			last_error = str(exc)
++			if attempt < max_retries - 1:
++				# Back off for transient failures (rate limits, network blips)
++				time.sleep(delay if ("429" in err_str or "rate" in err_str or "token" in err_str) else 1.0)
+ 				delay *= 2
+-			else:
+-				if attempt == max_retries - 1:
+-					return {
+-						"document_type": "invoice",
+-						"invoice_number": "INV-PROCESSED",
+-						"vendor_name": "Unknown Vendor",
+-						"total_amount": 0.0,
+-						"currency": "INR",
+-						"raw_text": ocr_text[:1000],
+-					}
+-				raise
+-
+-	# Clean potential markdown backticks if present
+-	if raw_content.startswith("```"):
+-		match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw_content, re.DOTALL)
+-		if match:
+-			raw_content = match.group(1).strip()
++				continue
++			raise StructuringError(f"Structuring service failed after {max_retries} attempts: {last_error}")
+ 
+-	try:
+-		parsed_json = json.loads(raw_content)
+-		if not isinstance(parsed_json, dict):
+-			parsed_json = {"document_type": "invoice", "fields": {}}
+-		return parsed_json
+-	except json.JSONDecodeError:
+-		return {"document_type": "invoice", "raw_text": ocr_text[:1000], "currency": "INR"}
++		parsed = _parse_llm_json(raw_content)
++		if parsed is not None and not _structuring_is_empty(parsed):
++			return parsed
++
++		last_error = "LLM returned unparseable or empty invoice data"
++		if attempt < max_retries - 1:
++			time.sleep(1.0)
++			continue
++
++	raise StructuringError(f"Could not structure invoice after {max_retries} attempts: {last_error}")
+ 
+ 
+ # -------------------------------------------------------------
+diff --git a/vector_store.py b/vector_store.py
+index e368114..1fb623b 100644
+--- a/vector_store.py
++++ b/vector_store.py
+@@ -521,10 +521,12 @@ def save_invoice_to_vector_store(
+ 		"user_id": str(user_id) if user_id else "",
+ 	}
+ 
+-	# Deterministic or unique doc_id
++	# Deterministic doc_id, namespaced by owner: the same invoice number
++	# uploaded by two different users must never collide or overwrite.
+ 	if inv_num and str(inv_num).strip() not in ("N/A", "Unknown", ""):
+ 		clean_inv = str(inv_num).strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
+-		doc_id = f"inv_{clean_inv}"
++		owner = str(user_id).strip() if user_id else "shared"
++		doc_id = f"inv_{owner}_{clean_inv}"
+ 	else:
+ 		doc_id = f"inv_{uuid.uuid4().hex[:12]}"
+ 
+@@ -550,7 +552,7 @@ def save_invoice_to_vector_store(
+ 					buyer_name, buyer_address, invoice_number, invoice_date,
+ 					items, subtotal, tax, discount, total_amount
+ 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+-				ON CONFLICT(file_name) DO UPDATE SET
++				ON CONFLICT(user_id, file_name) DO UPDATE SET
+ 					user_id=excluded.user_id,
+ 					vendor_name=excluded.vendor_name,
+ 					invoice_number=excluded.invoice_number,

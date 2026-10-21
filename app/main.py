@@ -505,7 +505,11 @@ async def get_user_invoices(
 
             # Match ChromaDB record
             chroma_match = chroma_by_file.get(f_name) or chroma_by_num.get(i_num) or {}
-            doc_id = chroma_match.get("_doc_id") or f"inv_{i_num or inv.id}"
+            if chroma_match.get("_doc_id"):
+                doc_id = chroma_match["_doc_id"]
+            else:
+                clean_fb = str(i_num or inv.id).strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
+                doc_id = f"inv_{user_id}_{clean_fb}"
 
             # Parse line items from JSON if present
             items = []
@@ -590,7 +594,10 @@ async def delete_user_invoice(
 
     # Also clean up from SQLite invoices table
     try:
-        clean_doc = doc_id.replace("inv_", "")
+        clean_doc = doc_id[len("inv_"):] if doc_id.startswith("inv_") else doc_id
+        user_prefix = f"{user_id}_"
+        if clean_doc.startswith(user_prefix):
+            clean_doc = clean_doc[len(user_prefix):]
         stmt = select(Invoice).where(
             (Invoice.user_id == current_user.id) &
             ((Invoice.file_name == doc_id) |

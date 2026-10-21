@@ -27,6 +27,14 @@ from vector_store import save_invoice_to_vector_store, load_index
 
 import threading
 
+
+class StructuringError(Exception):
+    """Raised when invoice structuring fails after all retries.
+
+    Callers must treat this as a failed extraction and reject the
+    upload; an empty invoice must never be fabricated or indexed.
+    """
+
 # -------------------------------------------------------------
 # 1. Helper: Resolve & Cache ONNX Model Paths and RapidOCR Singleton
 # -------------------------------------------------------------
@@ -174,19 +182,68 @@ def extract_text_from_file(file_path: str) -> tuple[str, float, float]:
 # -------------------------------------------------------------
 # 5. Step 4: Use LLM to Parse Raw OCR Text into Structured JSON
 # -------------------------------------------------------------
+def _parse_llm_json(raw_content: str):
+	"""Best-effort parse of an LLM JSON reply; returns dict or None."""
+	if not raw_content:
+		return None
+	text = raw_content.strip()
+	if text.startswith("```"):
+		match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+		if match:
+			text = match.group(1).strip()
+	try:
+		parsed = json.loads(text)
+		return parsed if isinstance(parsed, dict) else None
+	except json.JSONDecodeError:
+		pass
+	# Salvage: take the outermost {...} span in case of surrounding prose
+	start, end = text.find("{"), text.rfind("}")
+	if start != -1 and end > start:
+		try:
+			parsed = json.loads(text[start:end + 1])
+			return parsed if isinstance(parsed, dict) else None
+		except json.JSONDecodeError:
+			return None
+	return None
+
+
+def _structuring_is_empty(parsed: dict) -> bool:
+	"""True when a parsed result carries no usable invoice identity."""
+	if not parsed:
+		return True
+	fields = parsed.get("fields") if isinstance(parsed.get("fields"), dict) else parsed
+	vendor = str(fields.get("vendor_name") or fields.get("vendor") or "").strip()
+	total = fields.get("total_amount", fields.get("grand_total", 0))
+	try:
+		total_val = float(str(total).replace(",", "").replace("₹", "").strip() or 0)
+	except (TypeError, ValueError):
+		total_val = 0
+	return (not vendor or vendor.lower() == "unknown vendor") and total_val == 0
+
+
+def _run_structuring_chain(chain, ocr_text: str) -> str:
+	"""Invoke the structuring chain and return the raw reply text."""
+	response = chain.invoke({"ocr_text": ocr_text[:3500]})
+	return getattr(response, "content", str(response)).strip()
+
+
 def structure_invoice_json(ocr_text: str) -> dict:
 	"""
 	Pass raw OCR text to Groq LLM with concise dynamic schema instructions.
-	Uses capped max_tokens=800 and exponential backoff retry for transient 429s.
+
+	Reliability contract: this function NEVER fabricates an empty invoice.
+	It retries on rate limits AND on unparseable/empty outputs, and raises
+	StructuringError when every attempt fails, so the caller can reject the
+	upload instead of silently storing an 'Unknown Vendor / 0' record.
 	"""
 	if not ocr_text.strip():
-		return {"document_type": "invoice", "fields": {}, "line_items": [], "currency": "INR"}
+		raise StructuringError("No text could be extracted from the document.")
 
 	llm = ChatGroq(
 		model=GROQ_MODEL_NAME,
 		temperature=0,
 		api_key=GROQ_API_KEY,
-		max_tokens=800,
+		max_tokens=2000,
 	)
 
 	prompt = ChatPromptTemplate.from_template(
@@ -202,43 +259,31 @@ OCR TEXT:
 
 	max_retries = 3
 	delay = 1.5
-	raw_content = ""
+	last_error = "unknown error"
 
 	for attempt in range(max_retries):
 		try:
-			response = chain.invoke({"ocr_text": ocr_text[:3500]})
-			raw_content = getattr(response, "content", str(response)).strip()
-			break
+			raw_content = _run_structuring_chain(chain, ocr_text)
 		except Exception as exc:
 			err_str = str(exc).lower()
-			if ("429" in err_str or "rate limit" in err_str or "tokens" in err_str) and attempt < max_retries - 1:
-				time.sleep(delay)
+			last_error = str(exc)
+			if attempt < max_retries - 1:
+				# Back off for transient failures (rate limits, network blips)
+				time.sleep(delay if ("429" in err_str or "rate" in err_str or "token" in err_str) else 1.0)
 				delay *= 2
-			else:
-				if attempt == max_retries - 1:
-					return {
-						"document_type": "invoice",
-						"invoice_number": "INV-PROCESSED",
-						"vendor_name": "Unknown Vendor",
-						"total_amount": 0.0,
-						"currency": "INR",
-						"raw_text": ocr_text[:1000],
-					}
-				raise
+				continue
+			raise StructuringError(f"Structuring service failed after {max_retries} attempts: {last_error}")
 
-	# Clean potential markdown backticks if present
-	if raw_content.startswith("```"):
-		match = re.search(r"```(?:json)?\s*(.*?)\s*```", raw_content, re.DOTALL)
-		if match:
-			raw_content = match.group(1).strip()
+		parsed = _parse_llm_json(raw_content)
+		if parsed is not None and not _structuring_is_empty(parsed):
+			return parsed
 
-	try:
-		parsed_json = json.loads(raw_content)
-		if not isinstance(parsed_json, dict):
-			parsed_json = {"document_type": "invoice", "fields": {}}
-		return parsed_json
-	except json.JSONDecodeError:
-		return {"document_type": "invoice", "raw_text": ocr_text[:1000], "currency": "INR"}
+		last_error = "LLM returned unparseable or empty invoice data"
+		if attempt < max_retries - 1:
+			time.sleep(1.0)
+			continue
+
+	raise StructuringError(f"Could not structure invoice after {max_retries} attempts: {last_error}")
 
 
 # -------------------------------------------------------------

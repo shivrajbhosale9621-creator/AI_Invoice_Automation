@@ -521,10 +521,12 @@ def save_invoice_to_vector_store(
 		"user_id": str(user_id) if user_id else "",
 	}
 
-	# Deterministic or unique doc_id
+	# Deterministic doc_id, namespaced by owner: the same invoice number
+	# uploaded by two different users must never collide or overwrite.
 	if inv_num and str(inv_num).strip() not in ("N/A", "Unknown", ""):
 		clean_inv = str(inv_num).strip().replace(" ", "_").replace("/", "_").replace("\\", "_")
-		doc_id = f"inv_{clean_inv}"
+		owner = str(user_id).strip() if user_id else "shared"
+		doc_id = f"inv_{owner}_{clean_inv}"
 	else:
 		doc_id = f"inv_{uuid.uuid4().hex[:12]}"
 
@@ -550,7 +552,7 @@ def save_invoice_to_vector_store(
 					buyer_name, buyer_address, invoice_number, invoice_date,
 					items, subtotal, tax, discount, total_amount
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(file_name) DO UPDATE SET
+				ON CONFLICT(user_id, file_name) DO UPDATE SET
 					user_id=excluded.user_id,
 					vendor_name=excluded.vendor_name,
 					invoice_number=excluded.invoice_number,

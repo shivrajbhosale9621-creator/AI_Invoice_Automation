@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
-from sqlalchemy import String, Float, Integer, Text, DateTime, Uuid, ForeignKey
+from sqlalchemy import String, Float, Integer, Text, DateTime, Uuid, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 
@@ -15,6 +15,12 @@ def utc_now() -> datetime:
 
 class Invoice(Base):
     __tablename__ = "invoices"
+    # Uniqueness is per user: two different users may upload files with the
+    # same name (or invoices with the same number) without overwriting
+    # each other's records.
+    __table_args__ = (
+        UniqueConstraint("user_id", "file_name", name="uq_invoices_user_file"),
+    )
 
     id: Mapped[int] = mapped_column(
         Integer,
@@ -29,7 +35,6 @@ class Invoice(Base):
     )
     file_name: Mapped[str] = mapped_column(
         String(255),
-        unique=True,
         nullable=True,
     )
     vendor_name: Mapped[str] = mapped_column(
