@@ -1,0 +1,94 @@
+From e1bc85d75d8561415a2239a8b6d07916ca961834 Mon Sep 17 00:00:00 2001
+From: Code Review <review@local>
+Date: Tue, 20 Oct 2026 15:46:58 +0000
+Subject: [PATCH 1/2] fix: INBOX_DIR env var for GCS-mounted upload storage
+
+---
+ config.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/config.py b/config.py
+index e435a3c..8eda5c9 100644
+--- a/config.py
++++ b/config.py
+@@ -31,7 +31,7 @@ import chromadb
+ DEFAULT_CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
+ DEFAULT_CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "invoices")
+ DEFAULT_INDEX_PATH = DEFAULT_CHROMA_PATH
+-DEFAULT_INBOX_DIR = "./invoices_to_process"
++DEFAULT_INBOX_DIR = os.getenv("INBOX_DIR", "./invoices_to_process")
+ 
+ 
+ # --- API Keys & Model Names ---
+-- 
+2.43.0
+
+
+From 6b158cfbc9c538f58cacd80a4725f908a70bec4b Mon Sep 17 00:00:00 2001
+From: Code Review <review@local>
+Date: Wed, 21 Oct 2026 08:54:19 +0000
+Subject: [PATCH 2/2] fix: allow re-registration of unverified emails instead
+ of dead-end 409
+
+An abandoned signup (page closed before OTP entry) permanently blocked
+the email with 'Email already registered'. Now an unverified existing
+account refreshes its password and receives a fresh OTP; verified
+accounts still return 409.
+---
+ app/routers/auth.py | 35 +++++++++++++++++++++++------------
+ 1 file changed, 23 insertions(+), 12 deletions(-)
+
+diff --git a/app/routers/auth.py b/app/routers/auth.py
+index 68fdd64..a22693e 100644
+--- a/app/routers/auth.py
++++ b/app/routers/auth.py
+@@ -117,23 +117,34 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
+ 
+     # Check if user already exists
+     existing = await db.execute(select(User).where(User.email == clean_email))
+-    if existing.scalar_one_or_none():
++    existing_user = existing.scalar_one_or_none()
++    if existing_user and existing_user.is_verified:
+         raise HTTPException(
+             status_code=status.HTTP_409_CONFLICT,
+             detail={"status": "error", "error": "Email already registered"},
+         )
+ 
+-    # Hash password with Argon2id
+-    pwd_hash = hash_password(payload.password)
+-    user = User(
+-        email=clean_email,
+-        password_hash=pwd_hash,
+-        is_verified=False,
+-        is_active=True,
+-    )
+-    db.add(user)
+-    await db.commit()
+-    await db.refresh(user)
++    if existing_user:
++        # Abandoned registration: the account exists but was never verified
++        # (user closed the page before entering the OTP). Refresh the
++        # password and fall through to send a fresh OTP instead of
++        # dead-ending the user with "already registered".
++        existing_user.password_hash = hash_password(payload.password)
++        await db.commit()
++        await db.refresh(existing_user)
++        user = existing_user
++    else:
++        # Hash password with Argon2id
++        pwd_hash = hash_password(payload.password)
++        user = User(
++            email=clean_email,
++            password_hash=pwd_hash,
++            is_verified=False,
++            is_active=True,
++        )
++        db.add(user)
++        await db.commit()
++        await db.refresh(user)
+ 
+     # Generate OTP code & dispatch email
+     try:
+-- 
+2.43.0
+

@@ -31,7 +31,7 @@ import chromadb
 DEFAULT_CHROMA_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 DEFAULT_CHROMA_COLLECTION = os.getenv("CHROMA_COLLECTION", "invoices")
 DEFAULT_INDEX_PATH = DEFAULT_CHROMA_PATH
-DEFAULT_INBOX_DIR = "./invoices_to_process"
+DEFAULT_INBOX_DIR = os.getenv("INBOX_DIR", "./invoices_to_process")
 
 
 # --- API Keys & Model Names ---

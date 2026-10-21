@@ -117,23 +117,34 @@ async def signup(payload: SignupRequest, db: AsyncSession = Depends(get_db)):
 
     # Check if user already exists
     existing = await db.execute(select(User).where(User.email == clean_email))
-    if existing.scalar_one_or_none():
+    existing_user = existing.scalar_one_or_none()
+    if existing_user and existing_user.is_verified:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={"status": "error", "error": "Email already registered"},
         )
 
-    # Hash password with Argon2id
-    pwd_hash = hash_password(payload.password)
-    user = User(
-        email=clean_email,
-        password_hash=pwd_hash,
-        is_verified=False,
-        is_active=True,
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    if existing_user:
+        # Abandoned registration: the account exists but was never verified
+        # (user closed the page before entering the OTP). Refresh the
+        # password and fall through to send a fresh OTP instead of
+        # dead-ending the user with "already registered".
+        existing_user.password_hash = hash_password(payload.password)
+        await db.commit()
+        await db.refresh(existing_user)
+        user = existing_user
+    else:
+        # Hash password with Argon2id
+        pwd_hash = hash_password(payload.password)
+        user = User(
+            email=clean_email,
+            password_hash=pwd_hash,
+            is_verified=False,
+            is_active=True,
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
 
     # Generate OTP code & dispatch email
     try:
