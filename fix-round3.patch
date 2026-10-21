@@ -1,0 +1,217 @@
+From dcfa83d471f9121f1f49e00544cee0211996837f Mon Sep 17 00:00:00 2001
+From: Code Review <review@local>
+Date: Wed, 21 Oct 2026 09:07:28 +0000
+Subject: [PATCH] fix: stuck recent-ledger table, dead chart links in chat,
+ generic chat titles
+
+- renderRecentInvoices targeted a nonexistent element id, so the
+  dashboard Recent Ledger table stayed on 'Loading...' forever; it now
+  renders rows into dashboard-recent-table-body
+- Chat responses and stored history are stripped of chart links whose
+  HTML file does not exist (they rendered as raw 404 JSON in an iframe)
+- Conversations are titled from their first user message instead of
+  every chat showing the same fallback label
+---
+ app/main.py      | 36 ++++++++++++++++++++++++++++++++++++
+ chat_store.py    | 44 ++++++++++++++++++++++++++++++++++++++++++++
+ static/js/app.js | 34 ++++++++++++++--------------------
+ 3 files changed, 94 insertions(+), 20 deletions(-)
+
+diff --git a/app/main.py b/app/main.py
+index 1971a43..9860965 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -1,4 +1,5 @@
+ import os
++import re
+ import uuid
+ import datetime
+ import time
+@@ -67,6 +68,37 @@ init_db(CHAT_DB_PATH)
+ _orchestrator_cache: Dict[str, MainOrchestrator] = {}
+ _cache_lock = threading.Lock()
+ 
++_CHART_LINK_RE = re.compile(
++    r"\[CHART:\s*(/static/charts/[^\]]+)\]"
++    r"|\[[^\]]*\]\((/static/charts/[^)]+)\)"
++)
++
++
++def _drop_dead_chart_links(text: str) -> str:
++    """Remove chart references whose HTML file does not exist on disk.
++
++    The LLM can quote a chart URL from history or invent a plausible one;
++    rendering those produces an iframe showing a raw 404 JSON body.
++    Only links to files that actually exist survive.
++    """
++    if not text or "/static/charts/" not in text:
++        return text
++    charts_root = os.path.join(
++        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
++        "static", "charts",
++    )
++
++    def _exists(url: str) -> bool:
++        name = os.path.basename(url.strip())
++        return bool(name) and os.path.isfile(os.path.join(charts_root, name))
++
++    def _sub(m: "re.Match") -> str:
++        url = m.group(1) or m.group(2) or ""
++        return m.group(0) if _exists(url) else ""
++
++    cleaned = _CHART_LINK_RE.sub(_sub, text)
++    return re.sub(r"\n{3,}", "\n\n", cleaned).strip() if cleaned != text else text
++
+ 
+ def get_orchestrator(conversation_id: str, user_id: str) -> MainOrchestrator:
+     """Return a cached MainOrchestrator for (user_id, conversation_id) pair."""
+@@ -337,6 +369,7 @@ async def chat(
+             user_query=full_message,
+             idempotency_key=idempotency_key,
+         )
++        response_text = _drop_dead_chart_links(response_text)
+         return {
+             "status": "success",
+             "conversation_id": actual_conv_id,
+@@ -628,6 +661,9 @@ async def chat_history(
+             limit=limit,
+             db_path=CHAT_DB_PATH,
+         )
++        for m in messages:
++            if m.get("role") == "assistant" and m.get("content"):
++                m["content"] = _drop_dead_chart_links(m["content"])
+         return {
+             "status": "success",
+             "conversation_id": conversation_id,
+diff --git a/chat_store.py b/chat_store.py
+index 7d4ef67..129920b 100644
+--- a/chat_store.py
++++ b/chat_store.py
+@@ -15,6 +15,7 @@ LangGraph graph state checkpointing is a separate concern handled in orchestrato
+ """
+ 
+ import sqlite3
++import re
+ import uuid
+ import logging
+ import json
+@@ -226,6 +227,47 @@ def _touch_conversation(conn: sqlite3.Connection, conversation_id: str) -> None:
+     )
+ 
+ 
++def _derive_title(content: str, max_len: int = 48) -> str:
++    """Build a sidebar title from the first user message."""
++    text = " ".join((content or "").split())
++    # Drop internal attachment markers the API appends to user messages
++    text = re.sub(r"\[Attached file saved at:[^\]]*\]", "", text).strip()
++    text = text.strip(" .!?")
++    if not text:
++        return ""
++    if len(text) <= max_len:
++        return text
++    cut = text[:max_len].rsplit(" ", 1)[0] or text[:max_len]
++    return cut.strip() + "..."
++
++
++def _title_conversation_from_first_message(conn: sqlite3.Connection, conversation_id: str, content: str) -> None:
++    """Name an untitled conversation after its first user message.
++
++    Conversations are created with an empty title, so the sidebar used to
++    show the same fallback label for every chat. Only fills the title when
++    it is still empty and this is the conversation's first user message.
++    """
++    row = conn.execute(
++        "SELECT title FROM conversations WHERE conversation_id = ?",
++        (conversation_id,),
++    ).fetchone()
++    if not row or (row[0] or "").strip():
++        return
++    count = conn.execute(
++        "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
++        (conversation_id,),
++    ).fetchone()[0]
++    if count != 1:
++        return
++    title = _derive_title(content)
++    if title:
++        conn.execute(
++            "UPDATE conversations SET title = ? WHERE conversation_id = ?",
++            (title, conversation_id),
++        )
++
++
+ # ─────────────────────────────────────────────────────────────────────────────
+ # Message CRUD
+ # ─────────────────────────────────────────────────────────────────────────────
+@@ -275,6 +317,8 @@ def save_message(
+                 (mid, conversation_id, role, content, now, idempotency_key, meta_json),
+             )
+             _touch_conversation(conn, conversation_id)
++            if role == "user":
++                _title_conversation_from_first_message(conn, conversation_id, content)
+         except sqlite3.IntegrityError:
+             # Unique constraint on (conversation_id, idempotency_key) was violated
+             logger.debug(
+diff --git a/static/js/app.js b/static/js/app.js
+index 09a6495..ddea64d 100644
+--- a/static/js/app.js
++++ b/static/js/app.js
+@@ -602,21 +602,21 @@ function updateDashboardMetrics(invoices) {
+ }
+ 
+ function renderRecentInvoices(invoices) {
+-  const container = document.getElementById("recent-invoices-list");
+-  if (!container) return;
++  const tbody = document.getElementById("dashboard-recent-table-body");
++  if (!tbody) return;
+ 
+   const recent = [...invoices].slice(-5).reverse();
+ 
+   if (recent.length === 0) {
+-    container.innerHTML = `
+-      <div style="padding:2rem; text-align:center; color:var(--ink-muted); font-family:var(--font-mono); font-size:0.8rem;">
+-        [EMPTY FOLIO] NO AUDITED VOUCHERS RECORDED IN LEDGER
+-      </div>
++    tbody.innerHTML = `
++      <tr><td colspan="5" style="text-align:center; padding:1.5rem; color:var(--ink-muted); font-family:var(--font-mono); font-size:0.8rem;">
++        NO AUDITED VOUCHERS RECORDED IN LEDGER YET
++      </td></tr>
+     `;
+     return;
+   }
+ 
+-  container.innerHTML = recent
++  tbody.innerHTML = recent
+     .map((inv) => {
+       const invNum = inv.invoice_number || "N/A";
+       const vendor = cleanVendorName(inv.vendor_name || inv.seller);
+@@ -626,19 +626,13 @@ function renderRecentInvoices(invoices) {
+       const statusLabel = (inv.payment_status || "UNPAID").toUpperCase();
+ 
+       return `
+-        <div class="recent-invoice-item">
+-          <div class="recent-inv-left">
+-            <span class="recent-inv-number">${escapeHtml(invNum)}</span>
+-            <span class="recent-inv-vendor">${escapeHtml(vendor)}</span>
+-          </div>
+-          <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--ink-muted);">
+-            ${escapeHtml(date)}
+-          </div>
+-          <div class="recent-inv-right">
+-            <span class="recent-inv-amount">${formatMoney(amt, inv.currency)}</span>
+-            <span class="stamp-badge ${statusClass}">${statusLabel}</span>
+-          </div>
+-        </div>
++        <tr>
++          <td style="font-family:var(--font-mono);">${escapeHtml(invNum)}</td>
++          <td>${escapeHtml(vendor)}</td>
++          <td style="font-family:var(--font-mono); font-size:0.8rem;">${escapeHtml(date)}</td>
++          <td class="th-amount" style="text-align:right; font-family:var(--font-mono);">${formatMoney(amt, inv.currency)}</td>
++          <td style="text-align:right;"><span class="stamp-badge ${statusClass}">${statusLabel}</span></td>
++        </tr>
+       `;
+     })
+     .join("");
+-- 
+2.43.0
+

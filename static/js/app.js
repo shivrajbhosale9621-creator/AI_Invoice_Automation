@@ -602,21 +602,21 @@ function updateDashboardMetrics(invoices) {
 }
 
 function renderRecentInvoices(invoices) {
-  const container = document.getElementById("recent-invoices-list");
-  if (!container) return;
+  const tbody = document.getElementById("dashboard-recent-table-body");
+  if (!tbody) return;
 
   const recent = [...invoices].slice(-5).reverse();
 
   if (recent.length === 0) {
-    container.innerHTML = `
-      <div style="padding:2rem; text-align:center; color:var(--ink-muted); font-family:var(--font-mono); font-size:0.8rem;">
-        [EMPTY FOLIO] NO AUDITED VOUCHERS RECORDED IN LEDGER
-      </div>
+    tbody.innerHTML = `
+      <tr><td colspan="5" style="text-align:center; padding:1.5rem; color:var(--ink-muted); font-family:var(--font-mono); font-size:0.8rem;">
+        NO AUDITED VOUCHERS RECORDED IN LEDGER YET
+      </td></tr>
     `;
     return;
   }
 
-  container.innerHTML = recent
+  tbody.innerHTML = recent
     .map((inv) => {
       const invNum = inv.invoice_number || "N/A";
       const vendor = cleanVendorName(inv.vendor_name || inv.seller);
@@ -626,19 +626,13 @@ function renderRecentInvoices(invoices) {
       const statusLabel = (inv.payment_status || "UNPAID").toUpperCase();
 
       return `
-        <div class="recent-invoice-item">
-          <div class="recent-inv-left">
-            <span class="recent-inv-number">${escapeHtml(invNum)}</span>
-            <span class="recent-inv-vendor">${escapeHtml(vendor)}</span>
-          </div>
-          <div style="font-family:var(--font-mono); font-size:0.75rem; color:var(--ink-muted);">
-            ${escapeHtml(date)}
-          </div>
-          <div class="recent-inv-right">
-            <span class="recent-inv-amount">${formatMoney(amt, inv.currency)}</span>
-            <span class="stamp-badge ${statusClass}">${statusLabel}</span>
-          </div>
-        </div>
+        <tr>
+          <td style="font-family:var(--font-mono);">${escapeHtml(invNum)}</td>
+          <td>${escapeHtml(vendor)}</td>
+          <td style="font-family:var(--font-mono); font-size:0.8rem;">${escapeHtml(date)}</td>
+          <td class="th-amount" style="text-align:right; font-family:var(--font-mono);">${formatMoney(amt, inv.currency)}</td>
+          <td style="text-align:right;"><span class="stamp-badge ${statusClass}">${statusLabel}</span></td>
+        </tr>
       `;
     })
     .join("");

@@ -1,4 +1,5 @@
 import os
+import re
 import uuid
 import datetime
 import time
@@ -66,6 +67,37 @@ init_db(CHAT_DB_PATH)
 # Orchestrator session cache
 _orchestrator_cache: Dict[str, MainOrchestrator] = {}
 _cache_lock = threading.Lock()
+
+_CHART_LINK_RE = re.compile(
+    r"\[CHART:\s*(/static/charts/[^\]]+)\]"
+    r"|\[[^\]]*\]\((/static/charts/[^)]+)\)"
+)
+
+
+def _drop_dead_chart_links(text: str) -> str:
+    """Remove chart references whose HTML file does not exist on disk.
+
+    The LLM can quote a chart URL from history or invent a plausible one;
+    rendering those produces an iframe showing a raw 404 JSON body.
+    Only links to files that actually exist survive.
+    """
+    if not text or "/static/charts/" not in text:
+        return text
+    charts_root = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "static", "charts",
+    )
+
+    def _exists(url: str) -> bool:
+        name = os.path.basename(url.strip())
+        return bool(name) and os.path.isfile(os.path.join(charts_root, name))
+
+    def _sub(m: "re.Match") -> str:
+        url = m.group(1) or m.group(2) or ""
+        return m.group(0) if _exists(url) else ""
+
+    cleaned = _CHART_LINK_RE.sub(_sub, text)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip() if cleaned != text else text
 
 
 def get_orchestrator(conversation_id: str, user_id: str) -> MainOrchestrator:
@@ -337,6 +369,7 @@ async def chat(
             user_query=full_message,
             idempotency_key=idempotency_key,
         )
+        response_text = _drop_dead_chart_links(response_text)
         return {
             "status": "success",
             "conversation_id": actual_conv_id,
@@ -628,6 +661,9 @@ async def chat_history(
             limit=limit,
             db_path=CHAT_DB_PATH,
         )
+        for m in messages:
+            if m.get("role") == "assistant" and m.get("content"):
+                m["content"] = _drop_dead_chart_links(m["content"])
         return {
             "status": "success",
             "conversation_id": conversation_id,

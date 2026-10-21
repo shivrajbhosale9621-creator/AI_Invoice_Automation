@@ -15,6 +15,7 @@ LangGraph graph state checkpointing is a separate concern handled in orchestrato
 """
 
 import sqlite3
+import re
 import uuid
 import logging
 import json
@@ -226,6 +227,47 @@ def _touch_conversation(conn: sqlite3.Connection, conversation_id: str) -> None:
     )
 
 
+def _derive_title(content: str, max_len: int = 48) -> str:
+    """Build a sidebar title from the first user message."""
+    text = " ".join((content or "").split())
+    # Drop internal attachment markers the API appends to user messages
+    text = re.sub(r"\[Attached file saved at:[^\]]*\]", "", text).strip()
+    text = text.strip(" .!?")
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    cut = text[:max_len].rsplit(" ", 1)[0] or text[:max_len]
+    return cut.strip() + "..."
+
+
+def _title_conversation_from_first_message(conn: sqlite3.Connection, conversation_id: str, content: str) -> None:
+    """Name an untitled conversation after its first user message.
+
+    Conversations are created with an empty title, so the sidebar used to
+    show the same fallback label for every chat. Only fills the title when
+    it is still empty and this is the conversation's first user message.
+    """
+    row = conn.execute(
+        "SELECT title FROM conversations WHERE conversation_id = ?",
+        (conversation_id,),
+    ).fetchone()
+    if not row or (row[0] or "").strip():
+        return
+    count = conn.execute(
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ? AND role = 'user'",
+        (conversation_id,),
+    ).fetchone()[0]
+    if count != 1:
+        return
+    title = _derive_title(content)
+    if title:
+        conn.execute(
+            "UPDATE conversations SET title = ? WHERE conversation_id = ?",
+            (title, conversation_id),
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Message CRUD
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,6 +317,8 @@ def save_message(
                 (mid, conversation_id, role, content, now, idempotency_key, meta_json),
             )
             _touch_conversation(conn, conversation_id)
+            if role == "user":
+                _title_conversation_from_first_message(conn, conversation_id, content)
         except sqlite3.IntegrityError:
             # Unique constraint on (conversation_id, idempotency_key) was violated
             logger.debug(
