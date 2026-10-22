@@ -384,8 +384,10 @@ def generate_custom_graph(query: str):
 		scope = {"df": df.copy(), "pd": pd, "px": px, "go": go, "json": json, "io": io, "fig": None}
 		exec(code, scope)
 		fig = scope.get("fig")
-		if fig is not None:
+		if fig is not None and _figure_has_data(fig):
 			return fig
+		if fig is not None:
+			print("LLM chart had no data traces; using fallback chart builder.")
 	except Exception as e:
 		print(f"Error executing custom graph code / LLM: {e}")
 
